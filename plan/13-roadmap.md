@@ -117,6 +117,11 @@ chart sources can't cover the bbox.*
       `voyages.gpx_blob` during the `finalizing` stage (inlined in
       planner for now; standalone module + full XSD validation is M5)
 
+- [ ] Dedicated `bv.router.*` metrics (plan/router-spec) — spans are
+      wired via `job.routing` / `forecast.prefetch`; per-step histograms
+      (`bv.router.step_duration_seconds`, heading-fan size, isochrone
+      frontier size) still TODO
+
 - [x] One completed routed candidate end-to-end over `/voyages`
 
 ## M3 — Candidate enumeration + multi-objective ✅
@@ -214,15 +219,24 @@ renders cleanly in OpenCPN with primary + contingencies + navaids.*
 *Goal: cold-start voyage with network disabled (post-prefetch) end-to-
 end.*
 
-- [ ] Stale-while-error everywhere
+- [x] Stale-while-error in the cache wrapper (returns `CacheResult.stale=True`
+      when upstream fails but a prior cache row exists — tested in
+      `tests/unit/test_cache.py`)
+
+- [x] Prune task for expired cache rows (`services/cache_pruner.py`;
+      hourly `run_forever()` registered on the FastAPI lifespan)
+
+- [x] Request-level input validation for `INVALID_WINDOW`
+      (start_at ≥ end_at, window > 14 days, origin == destination)
 
 - [ ] `503` with cached-data hint when all candidates fail offline
+      (currently returns `status=failed` with `ROUTE_BLOCKED` —
+      doesn't distinguish offline from actual no-route)
 
-- [ ] Prune task for expired cache rows
+- [ ] Surface `stale_at` on the voyage's `bv:coverage` when any upstream
+      cache served stale
 
-- [ ] Grafana dashboard JSON checked in (provisioned on the lgtm
-  
-      stack)
+- [ ] Grafana dashboard JSON checked in (provisioned on the lgtm stack)
 
 - [ ] Ops docs
 
