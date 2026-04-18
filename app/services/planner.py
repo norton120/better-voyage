@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from datetime import time as dtime
+from typing import Any
 from xml.sax.saxutils import escape
 from zoneinfo import ZoneInfo
 
@@ -108,6 +109,10 @@ class PlanState:
     forecast: ForecastField | None = None
     candidates: list[Candidate] = field(default_factory=list)
     skipped: dict[str, int] = field(default_factory=dict)
+    # Oldest `fetched_at` among any upstream cache row that served
+    # stale during prefetch. Lifted off `forecast.stale_at` so it
+    # survives after the `ForecastField` is discarded.
+    forecast_stale_at: datetime | None = None
 
 
 def _bbox_from_request(req: VoyageRequest, pad_deg: float = 0.5) -> tuple[float, float, float, float]:
@@ -195,6 +200,11 @@ async def _stage_forecast_prefetching(state: PlanState) -> None:
                 "FORECAST_UNAVAILABLE", "forecast_prefetching", str(exc)[:400]
             ) from exc
     state.forecast = field_
+    state.forecast_stale_at = field_.stale_at
+    if field_.stale_at is not None:
+        # Persist an early coverage snapshot so a later offline failure
+        # can still surface the staleness hint on GET /voyages/{id}.
+        await _write_coverage(state)
     await write_progress(state.voyage_id, "forecast_prefetching", 1.0)
 
 
@@ -312,6 +322,16 @@ async def _stage_routing(state: PlanState) -> None:
     state.skipped = skipped
 
     if not state.candidates:
+        if state.forecast_stale_at is not None:
+            raise PlannerError(
+                "OFFLINE_NO_ROUTE",
+                "routing",
+                (
+                    f"no candidates survived with stale forecast "
+                    f"(oldest cache fetched_at={state.forecast_stale_at.isoformat()}); "
+                    f"skipped={skipped}"
+                ),
+            )
         raise PlannerError(
             "ROUTE_BLOCKED",
             "routing",
@@ -334,21 +354,40 @@ async def _stage_finalizing(state: PlanState) -> None:
         _derive_contingencies(state)
         await _render_summaries(state)
         gpx = _emit_gpx(state)
-        coverage = json.dumps(
-            {
-                "forecast": "open-meteo-marine",
-                "tides": None,
-                "charts": {"source": "null-chart-store"},
-                "skipped": state.skipped,
-                "candidates_surfaced": len(state.candidates),
-            }
-        )
+        coverage = json.dumps(_coverage_payload(state))
         async with session_scope() as session:
             row = await session.get(Voyage, state.voyage_id)
             if row is None:
                 raise LookupError(f"voyage {state.voyage_id} not found")
             row.gpx_blob = gpx
             row.coverage_json = coverage
+
+
+def _coverage_payload(state: PlanState) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "forecast": "open-meteo-marine",
+        "tides": None,
+        "charts": {"source": "null-chart-store"},
+        "skipped": dict(state.skipped),
+        "candidates_surfaced": len(state.candidates),
+    }
+    if state.forecast_stale_at is not None:
+        payload["forecast_stale_at"] = state.forecast_stale_at.isoformat()
+    return payload
+
+
+async def _write_coverage(state: PlanState) -> None:
+    """Persist the current coverage snapshot mid-run.
+
+    Called after forecast prefetch flags staleness so a subsequent
+    offline failure still has something to show the client.
+    """
+    coverage = json.dumps(_coverage_payload(state))
+    async with session_scope() as session:
+        row = await session.get(Voyage, state.voyage_id)
+        if row is None:
+            return
+        row.coverage_json = coverage
 
 
 def _derive_contingencies(state: PlanState) -> None:
@@ -411,6 +450,14 @@ def _emit_gpx(state: PlanState) -> bytes:
     origin_label = escape(req.origin.name or "Origin")
     dest_label = escape(req.destination.name or "Destination")
 
+    metadata_xml = ""
+    if state.forecast_stale_at is not None:
+        metadata_xml = (
+            "  <metadata><extensions>"
+            f'<bv:coverage forecastStaleAt="{state.forecast_stale_at.isoformat()}"/>'
+            "</extensions></metadata>\n"
+        )
+
     rtes: list[str] = []
     for c in state.candidates:
         pts = c.route.points
@@ -464,6 +511,7 @@ def _emit_gpx(state: PlanState) -> bytes:
         '<gpx version="1.1" creator="better-voyage/0.1"\n'
         '     xmlns="http://www.topografix.com/GPX/1/1"\n'
         '     xmlns:bv="https://better-voyage.app/gpx/1">\n'
+        f"{metadata_xml}"
         f"{chr(10).join(rtes)}\n"
         "</gpx>\n"
     ).encode()

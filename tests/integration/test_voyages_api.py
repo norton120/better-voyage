@@ -229,6 +229,56 @@ async def test_cancel_returns_cancelled(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_returns_503_when_failed_offline(client: AsyncClient) -> None:
+    """GET /voyages/{id} returns 503 for OFFLINE_NO_ROUTE failures and
+    surfaces the cached-data hint in `voyage.coverage`."""
+    import json as _json
+
+    from app.clients.cache import utc_now
+    from app.db import session_scope
+    from app.models.voyage import Voyage
+    from app.schemas.request import VoyageRequest, compute_inputs_hash
+    from app.services.jobs import new_voyage_id
+
+    req = VoyageRequest.model_validate(_payload())
+    vid = new_voyage_id()
+    now = utc_now()
+    stale_iso = "2026-04-17T12:00:00+00:00"
+    coverage = {
+        "forecast": "open-meteo-marine",
+        "tides": None,
+        "charts": {"source": "null-chart-store"},
+        "skipped": {"route_blocked": 2},
+        "candidates_surfaced": 0,
+        "forecast_stale_at": stale_iso,
+    }
+    async with session_scope() as session:
+        session.add(
+            Voyage(
+                id=vid,
+                created_at=now,
+                started_at=now,
+                completed_at=now,
+                status="failed",
+                progress_json="{}",
+                request_json=req.model_dump_json(),
+                inputs_hash=compute_inputs_hash(req),
+                coverage_json=_json.dumps(coverage),
+                error_code="OFFLINE_NO_ROUTE",
+                error_stage="routing",
+                error_detail="no candidates survived with stale forecast",
+            )
+        )
+
+    resp = await client.get(f"/voyages/{vid}")
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "failed"
+    assert body["error"]["code"] == "OFFLINE_NO_ROUTE"
+    assert body["voyage"]["coverage"]["forecast_stale_at"] == stale_iso
+
+
+@pytest.mark.asyncio
 async def test_cancel_terminal_voyage_is_noop(client: AsyncClient, httpx_mock) -> None:
     _register_open_meteo_mocks(httpx_mock)
 

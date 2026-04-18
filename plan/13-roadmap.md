@@ -229,12 +229,16 @@ end.*
 - [x] Request-level input validation for `INVALID_WINDOW`
       (start_at ≥ end_at, window > 14 days, origin == destination)
 
-- [ ] `503` with cached-data hint when all candidates fail offline
-      (currently returns `status=failed` with `ROUTE_BLOCKED` —
-      doesn't distinguish offline from actual no-route)
+- [x] `503` with cached-data hint when all candidates fail offline
+      (new `OFFLINE_NO_ROUTE` error code raised by the planner when
+      forecast served stale AND no candidates survived; `GET
+      /voyages/{id}` maps it to 503 and surfaces `coverage` in the
+      body)
 
-- [ ] Surface `stale_at` on the voyage's `bv:coverage` when any upstream
-      cache served stale
+- [x] Surface `stale_at` on the voyage's `bv:coverage` when any upstream
+      cache served stale (`ForecastField.stale_at` bubbles into
+      `coverage_json.forecast_stale_at` and `<bv:coverage
+      forecastStaleAt="..."/>` in the emitted GPX)
 
 - [ ] Grafana dashboard JSON checked in (provisioned on the lgtm stack)
 

@@ -65,16 +65,28 @@ def _progress(row: Voyage) -> Progress:
 def _voyage_doc(row: Voyage) -> dict[str, Any] | None:
     """Parsed JSON mirror of the voyage body, surfaced when `done`.
 
-    For now we just expose a thin envelope; the full GPX-native
-    document lands as routing + GPX emission mature.
+    Also surfaced when the voyage failed offline with cached context
+    (OFFLINE_NO_ROUTE) so the client can show the stale-data hint.
     """
-    if row.status != "done":
-        return None
-    return {
-        "metadata": {"name": "voyage"},
-        "gpx_available": row.gpx_blob is not None,
-        "coverage": json.loads(row.coverage_json) if row.coverage_json else None,
-    }
+    coverage: dict[str, Any] | None = None
+    if row.coverage_json:
+        try:
+            coverage = json.loads(row.coverage_json)
+        except json.JSONDecodeError:
+            coverage = None
+    if row.status == "done":
+        return {
+            "metadata": {"name": "voyage"},
+            "gpx_available": row.gpx_blob is not None,
+            "coverage": coverage,
+        }
+    if row.error_code == "OFFLINE_NO_ROUTE" and coverage is not None:
+        return {
+            "metadata": {"name": "voyage"},
+            "gpx_available": False,
+            "coverage": coverage,
+        }
+    return None
 
 
 def _state(row: Voyage) -> VoyageState:
@@ -190,8 +202,10 @@ async def post_voyage(
 
 
 @router.get("/{voyage_id}", summary="Voyage state")
-async def get_voyage(voyage_id: str) -> VoyageState:
+async def get_voyage(voyage_id: str, response: Response) -> VoyageState:
     row = await _load(voyage_id)
+    if row.error_code == "OFFLINE_NO_ROUTE":
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return _state(row)
 
 

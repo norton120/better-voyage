@@ -29,6 +29,7 @@ from typing import Any
 import numpy as np
 
 from app.clients import open_meteo
+from app.clients.cache import CacheResult
 from app.config import get_settings
 from app.logging import get_logger
 from app.observability import meter, tracer
@@ -67,6 +68,11 @@ class ForecastField:
         self.lon_grid: np.ndarray | None = None
         self.time_grid: np.ndarray | None = None  # dtype=datetime64[s], tz-naive UTC
         self.data: dict[str, np.ndarray] = {}
+        # Oldest `fetched_at` among any upstream row that served stale
+        # during `prefetch`. `None` means every upstream fetch was fresh.
+        # Callers propagate this into `voyages.coverage_json` so the user
+        # sees when the forecast last came from the live API.
+        self.stale_at: datetime | None = None
 
     # ---- prefetch ----------------------------------------------------
 
@@ -101,16 +107,31 @@ class ForecastField:
                 "window.end": end.isoformat(),
             },
         ):
-            async def _one(i: int, j: int, la: float, lo: float) -> tuple[int, int, dict[str, Any], dict[str, Any]]:
+            async def _one(
+                i: int, j: int, la: float, lo: float
+            ) -> tuple[int, int, CacheResult, CacheResult]:
                 async with sem:
                     marine = await open_meteo.fetch_marine(la, lo, start_d, end_d)
                     wind = await open_meteo.fetch_wind(la, lo, start_d, end_d)
                 _prefetch_points.add(1)
-                return i, j, marine.body, wind.body
+                return i, j, marine, wind
 
-            results = await asyncio.gather(
+            fetched = await asyncio.gather(
                 *[_one(i, j, la, lo) for (i, j, la, lo) in grid_points]
             )
+
+        stale_candidates: list[datetime] = []
+        for _, _, marine_cr, wind_cr in fetched:
+            if marine_cr.stale:
+                stale_candidates.append(marine_cr.fetched_at)
+            if wind_cr.stale:
+                stale_candidates.append(wind_cr.fetched_at)
+        if stale_candidates:
+            self.stale_at = min(stale_candidates)
+
+        results: list[tuple[int, int, dict[str, Any], dict[str, Any]]] = [
+            (i, j, m.body, w.body) for (i, j, m, w) in fetched
+        ]
 
         # Time axis from the first non-empty response.
         sample_hours: list[str] = []

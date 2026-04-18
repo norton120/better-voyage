@@ -122,3 +122,56 @@ async def test_at_returns_none_outside_time_window(httpx_mock) -> None:
 def test_km_h_to_knots_factor() -> None:
     # 1.852 km/h == 1 kt
     assert pytest.approx(1.0) == 1.852 * KMH_TO_KTS
+
+
+@pytest.mark.asyncio
+async def test_prefetch_records_stale_at_when_cache_served_stale(
+    httpx_mock, monkeypatch
+) -> None:
+    """When a cache row is served stale-while-error, prefetch should
+    surface the oldest `fetched_at` as `ForecastField.stale_at`.
+    """
+    from app.clients import open_meteo
+    from app.clients.cache import CacheResult
+
+    stale_ts = datetime(2026, 4, 17, 12, 0, tzinfo=UTC)
+    fresh_ts = datetime(2026, 4, 17, 18, 0, tzinfo=UTC)
+
+    async def fake_marine(lat, lon, start, end):
+        return CacheResult(body=_marine_body(), fetched_at=stale_ts, stale=True)
+
+    async def fake_wind(lat, lon, start, end):
+        return CacheResult(body=_wind_body(), fetched_at=fresh_ts, stale=False)
+
+    monkeypatch.setattr(open_meteo, "fetch_marine", fake_marine)
+    monkeypatch.setattr(open_meteo, "fetch_wind", fake_wind)
+
+    field = ForecastField(grid_res_deg=0.5)
+    await field.prefetch(
+        bbox=(38.0, -77.0, 39.0, -76.0),
+        start=datetime(2026, 4, 18, tzinfo=UTC),
+        end=datetime(2026, 4, 18, tzinfo=UTC),
+    )
+    assert field.stale_at == stale_ts
+
+
+@pytest.mark.asyncio
+async def test_prefetch_stale_at_none_when_fresh(httpx_mock) -> None:
+    httpx_mock.add_response(
+        url=re.compile(r"https://marine-api\.open-meteo\.com/.*"),
+        json=_marine_body(),
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        url=re.compile(r"https://api\.open-meteo\.com/v1/forecast.*"),
+        json=_wind_body(),
+        is_reusable=True,
+    )
+
+    field = ForecastField(grid_res_deg=0.5)
+    await field.prefetch(
+        bbox=(38.0, -77.0, 39.0, -76.0),
+        start=datetime(2026, 4, 18, tzinfo=UTC),
+        end=datetime(2026, 4, 18, tzinfo=UTC),
+    )
+    assert field.stale_at is None
