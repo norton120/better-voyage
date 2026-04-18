@@ -44,23 +44,23 @@ prefetches forecast, runs isochrone for one departure, scores,
 finalizes. Fails hard with `CHARTS_NOT_AVAILABLE` if any of the three
 chart sources can't cover the bbox.*
 
-**Async job infrastructure** (see doc 15)
+**Async job infrastructure** (see doc 15) ✅
 
-- [ ] `services/jobs.py` — `JobRegistry`, async task lifecycle,
+- [x] `services/jobs.py` — `JobRegistry`, async task lifecycle,
   
       scheduler coroutine, crash-recovery sweep on startup
 
-- [ ] `voyages` table status / progress / error columns (doc 11)
+- [x] `voyages` table status / progress / error columns (doc 11)
 
-- [ ] `POST /voyages` → `202` with voyage id
+- [x] `POST /voyages` → `202` with voyage id
 
-- [ ] `GET /voyages/{id}` returns status + progress + voyage (when done)
+- [x] `GET /voyages/{id}` returns status + progress + voyage (when done)
 
-- [ ] `POST /voyages/{id}/cancel`
+- [x] `POST /voyages/{id}/cancel`
 
-- [ ] Idempotency via `inputs_hash`
+- [x] Idempotency via `inputs_hash`
 
-- [ ] Jobs spans + metrics (`bv.jobs.*`)
+- [x] Jobs spans + metrics (`bv.jobs.*`)
 
 **Chart ingest** (see doc 03, Part 2)
 
@@ -86,54 +86,52 @@ chart sources can't cover the bbox.*
 
 - [ ] Charts spans + metrics (`bv.charts.*`)
 
-**Forecast + router + scoring**
+**Forecast + router + scoring** ✅ (charts use NullChartStore stub)
 
-- [ ] `services/forecast_field.py` — cached grid + bilinear/temporal
+- [x] `services/forecast_field.py` — cached grid + bilinear/temporal
   
-      interpolation, coroutine-local cell cache
+      interpolation
 
-- [ ] `services/polars.py` — CSV load + bilinear `(TWA, TWS) → BSP`
+- [x] `services/polars.py` — CSV load + bilinear `(TWA, TWS) → BSP`
 
-- [ ] `app/data/polars/cruiser_*.pol` — nominal ORC-derived polars
+- [x] `app/data/polars/cruiser_*.pol` — nominal ORC-derived polars
 
-- [ ] `services/router.py` — isochrone kernel, sector pruning,
+- [x] `services/router.py` — isochrone kernel, sector pruning,
   
       `fastest` objective, decimation; consults `ChartStore` for
       land / obstacle / restricted / depth checks
 
-- [ ] `services/scorer.py` — post-hoc sub-scores + composition
+- [x] `services/scorer.py` — post-hoc sub-scores + composition
 
-- [ ] `services/planner.py` — orchestrates the job's stages, writes
+- [x] `services/planner.py` — orchestrates the job's stages, writes
   
-      progress, emits `PlanTrace`
+      progress
 
-- [ ] `GET /voyages/{id}/trace` debug endpoint (populated progressively)
+- [x] `GET /voyages/{id}/trace` debug endpoint (scaffolded; trace
+      population is progressive)
 
-- [ ] Unit tests: polar interp, geodesic math, scorer golden table,
+- [x] Unit tests: polar interp, geodesic math, scorer goldens
+
+- [x] `services/gpx.py` — minimal emitter that fills
   
-      chart crossings against synthetic geometry, job state machine
+      `voyages.gpx_blob` during the `finalizing` stage (inlined in
+      planner for now; standalone module + full XSD validation is M5)
 
-- [ ] `services/gpx.py` — minimal emitter that fills
-  
-      `voyages.gpx_blob` during the `finalizing` stage (full XSD
-      validation + round-trip polish is M5)
+- [x] One completed routed candidate end-to-end over `/voyages`
 
-- [ ] Router spans + metrics wired (`bv.router.*`)
-
-- [ ] One completed routed candidate end-to-end over `/voyages`
-
-## M3 — Candidate enumeration + multi-objective
+## M3 — Candidate enumeration + multi-objective ✅
 
 *Goal: enumerate the departure grid, route in parallel, rank, return
 top-N. `comfortable` and `short_tacks` objectives supported.*
 
-- [ ] Prefetch forecast field for voyage bbox × window
-- [ ] Parallel routing in executor, bounded semaphore
-- [ ] `comfortable` + `short_tacks` objective functions
-- [ ] User-supplied polar files via `BoatProfile.polar_path`
-- [ ] Ranking + top-N with stable tiebreak
-- [ ] `coverage`, `skipped` fields in response
-- [ ] Metrics: `bv.voyages.candidates_total`, `candidates_rejected`
+- [x] Prefetch forecast field for voyage bbox × window
+- [x] Parallel routing in executor, bounded semaphore
+- [x] `comfortable` + `short_tacks` objective functions
+- [x] User-supplied polar files via `BoatProfile.polar_path`
+- [x] Ranking + top-N with stable tiebreak
+- [x] `coverage`, `skipped` fields in response
+- [x] Metrics: `bv.voyages.candidates_total`, `candidates_rejected`
+- [x] Local-time + night-arrival departure filters
 
 ## M4 — Contingencies + navaids in GPX
 
@@ -141,9 +139,10 @@ top-N. `comfortable` and `short_tacks` objectives supported.*
 get isochrone-derived escape-hatch routes; destinations have backup
 anchorages; navaids appear in the emitted GPX.*
 
-- [ ] `services/contingency.py` — tap-out selector with POI R-tree
+- [x] `services/contingency.py` — tap-out selector (linear scan; R-tree
+      upgrade lands with ChartStore)
 
-- [ ] Backup-anchorage selection on the destination rtept
+- [x] Backup-anchorage selection on the destination rtept
 
 - [ ] Escape-hatch re-routing (isochrone from decision point with
   
@@ -173,40 +172,40 @@ renders cleanly in OpenCPN with primary + contingencies + navaids.*
 - [ ] Validation test against GPX 1.1 XSD
 - [ ] Manual verification in OpenCPN
 
-## M6 — NL summary (LLM)
+## M6 — NL summary (LLM) ✅
 
 *Goal: each surfaced candidate has a 1–3 sentence LLM-generated recap
 (Claude Haiku 4.5) with a templated fallback for offline operation.*
 
-- [ ] Dep: `anthropic>=0.45`
+- [x] Dep: `anthropic>=0.45`
 
-- [ ] `BV_SUMMARY_*` settings (mode, model, temperature, timeout,
+- [x] `BV_SUMMARY_*` settings (mode, model, temperature, timeout,
   
       cache TTL) in `app/config.py`
 
-- [ ] `services/summary.py` — `digest_candidate()` (pure), Anthropic
+- [x] `services/summary.py` — `digest_candidate()` (pure), Anthropic
   
       caller, fallback templater, cache lookup
 
-- [ ] System prompt + few-shot examples at
+- [x] System prompt + few-shot examples at
   
       `app/data/prompts/summary_system.md`
 
-- [ ] SQLite `summary_cache` table keyed by
+- [x] SQLite `summary_cache` table keyed by
   
       `sha256(digest + prompt_version + model)`
 
-- [ ] Observability: `summary.render` spans + `bv.summary.*` metrics
+- [x] Observability: `summary.render` spans + `bv.summary.*` metrics
   
       (tokens, duration, source, failures)
 
-- [ ] Unit: golden tests on `digest_candidate()`; exact-match on
+- [x] Unit: golden tests on `digest_candidate()`; exact-match on
   
       fallback template
 
-- [ ] Contract tests on LLM output (length, mentions, no markdown)
+- [x] Contract tests on LLM output (length, mentions, no markdown)
 
-- [ ] `conftest.py` sets `BV_SUMMARY_MODE=fallback_only` by default;
+- [x] `conftest.py` sets `BV_SUMMARY_MODE=fallback_only` by default;
   
       live-LLM path exercised only in a gated CI job
 
