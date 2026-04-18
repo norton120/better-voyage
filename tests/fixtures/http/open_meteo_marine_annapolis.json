@@ -1,0 +1,30 @@
+{
+  "latitude": 38.975,
+  "longitude": -76.4875,
+  "generationtime_ms": 0.15,
+  "utc_offset_seconds": 0,
+  "timezone": "GMT",
+  "timezone_abbreviation": "GMT",
+  "hourly_units": {
+    "time": "iso8601",
+    "wave_height": "m",
+    "wave_direction": "°",
+    "wave_period": "s",
+    "ocean_current_velocity": "km/h",
+    "ocean_current_direction": "°"
+  },
+  "hourly": {
+    "time": ["2026-04-18T00:00", "2026-04-18T01:00", "2026-04-18T02:00"],
+    "wave_height": [0.4, 0.5, 0.5],
+    "wave_direction": [180, 185, 190],
+    "wave_period": [3.2, 3.4, 3.5],
+    "wind_wave_height": [0.3, 0.4, 0.4],
+    "wind_wave_direction": [175, 180, 185],
+    "wind_wave_period": [2.9, 3.0, 3.1],
+    "swell_wave_height": [0.2, 0.2, 0.2],
+    "swell_wave_direction": [190, 195, 200],
+    "swell_wave_period": [4.1, 4.2, 4.3],
+    "ocean_current_velocity": [0.15, 0.18, 0.20],
+    "ocean_current_direction": [45, 50, 55]
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "count": 2,
+  "stations": [
+    {"id": "8575512", "name": "Annapolis", "lat": 38.9833, "lng": -76.4803, "state": "MD"},
+    {"id": "8452660", "name": "Newport", "lat": 41.5044, "lng": -71.3267, "state": "RI"}
+  ]
+}

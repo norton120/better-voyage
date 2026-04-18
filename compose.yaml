@@ -1,0 +1,46 @@
+services:
+  app:
+    build:
+      context: .
+      target: dev
+    image: better-voyage:dev
+    container_name: better-voyage
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app
+      - ./tests:/app/tests
+      - voyage-data:/data
+    environment:
+      BV_ENV: dev
+      BV_DATABASE_URL: sqlite+aiosqlite:////data/better-voyage.db
+      BV_CACHE_DIR: /data/cache
+      BV_LOG_LEVEL: DEBUG
+      BV_OTEL_EXPORTER: ${BV_OTEL_EXPORTER:-console}
+      BV_OTEL_ENDPOINT: http://otel-lgtm:4318
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # Optional local observability backend: Grafana + Tempo + Loki +
+  # Prometheus in a single container. Enable with:
+  #   BV_OTEL_EXPORTER=otlp docker compose --profile observability up
+  # Grafana UI:  http://localhost:3000   (admin / admin)
+  # OTLP HTTP:   http://otel-lgtm:4318   (from inside the compose network)
+  otel-lgtm:
+    image: grafana/otel-lgtm:latest
+    profiles: ["observability"]
+    container_name: better-voyage-otel-lgtm
+    ports:
+      - "3000:3000"   # Grafana
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    volumes:
+      - otel-lgtm-data:/data
+
+volumes:
+  voyage-data:
+  otel-lgtm-data:
