@@ -17,7 +17,9 @@ import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from datetime import time as dtime
 from xml.sax.saxutils import escape
+from zoneinfo import ZoneInfo
 
 from app.db import session_scope
 from app.logging import get_logger
@@ -117,15 +119,51 @@ def _bbox_from_request(req: VoyageRequest, pad_deg: float = 0.5) -> tuple[float,
 def enumerate_departures(req: VoyageRequest, step_hours: int = 1) -> list[datetime]:
     """Hourly departure grid across `[window.start_at, window.end_at]`.
 
-    Local-time filters and night-arrival filtering (plan/07 §Enumeration)
-    are stubbed for M2; full filtering lands with the BoatProfile table.
+    Local-time constraints (`earliest_departure_local_time`,
+    `latest_departure_local_time`) in the window's IANA tz drop
+    candidates outside the preferred window per plan/07 §Enumeration.
+    Night-arrival filtering happens post-routing since arrival time
+    isn't known until the router finishes.
     """
+    try:
+        tz = ZoneInfo(req.window.tz)
+    except Exception:
+        tz = ZoneInfo("UTC")
+
+    earliest = req.window.earliest_departure_local_time
+    latest = req.window.latest_departure_local_time
+
     out: list[datetime] = []
     t = req.window.start_at
     while t <= req.window.end_at:
-        out.append(t)
+        if _within_local_time_window(t, tz, earliest, latest):
+            out.append(t)
         t += timedelta(hours=step_hours)
     return out
+
+
+def _within_local_time_window(
+    t: datetime, tz: ZoneInfo, earliest: dtime | None, latest: dtime | None
+) -> bool:
+    if earliest is None and latest is None:
+        return True
+    local = t.astimezone(tz).time()
+    if earliest is not None and latest is not None:
+        if earliest <= latest:
+            return earliest <= local <= latest
+        # Wraps midnight (e.g. 22:00-06:00).
+        return local >= earliest or local <= latest
+    if earliest is not None:
+        return local >= earliest
+    if latest is not None:
+        return local <= latest
+    return True
+
+
+def _is_night_local(t: datetime, tz: ZoneInfo) -> bool:
+    """22:00-06:00 local per plan/07 §Enumeration."""
+    h = t.astimezone(tz).hour
+    return h >= 22 or h < 6
 
 
 # --- stages --------------------------------------------------------------
@@ -241,6 +279,11 @@ async def _stage_routing(state: PlanState) -> None:
 
         results = await asyncio.gather(*[_one(t) for t in departures])
 
+    try:
+        tz = ZoneInfo(state.req.window.tz)
+    except Exception:
+        tz = ZoneInfo("UTC")
+
     survivors: list[tuple[datetime, RouteResult, Score]] = []
     skipped: dict[str, int] = {}
     for depart_at, route, err in results:
@@ -249,6 +292,10 @@ async def _stage_routing(state: PlanState) -> None:
             _candidates_rejected.add(1, {"reason": err})
             continue
         assert route is not None
+        if not profile.night_sailing_ok and _is_night_local(route.reached_at, tz):
+            skipped["night_arrival"] = skipped.get("night_arrival", 0) + 1
+            _candidates_rejected.add(1, {"reason": "NIGHT_ARRIVAL"})
+            continue
         s = score_candidate(route.points)
         survivors.append((depart_at, route, s))
 
