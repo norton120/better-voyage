@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 
@@ -36,6 +37,21 @@ _m = meter("app.services.jobs")
 _submitted = _m.create_counter("bv.jobs.submitted", unit="1")
 _completed = _m.create_counter("bv.jobs.completed", unit="1")
 _stage_transitions = _m.create_counter("bv.jobs.stage_transitions", unit="1")
+_duration = _m.create_histogram(
+    "bv.jobs.duration_seconds",
+    description="End-to-end duration of a voyage job, from wrap-start to terminal status",
+    unit="s",
+)
+_stage_duration = _m.create_histogram(
+    "bv.jobs.stage_duration_seconds",
+    description="Time spent in each stage, recorded on transition out",
+    unit="s",
+)
+_failures = _m.create_counter(
+    "bv.jobs.failures",
+    description="Job-terminal failures, by error_code",
+    unit="1",
+)
 
 LIVE_STAGES: frozenset[str] = frozenset(
     {
@@ -119,9 +135,12 @@ class JobRegistry:
 
     async def _wrap(self, voyage_id: str) -> None:
         started_at: datetime | None = None
+        status_label = "done"
+        wall_start = time.monotonic()
         try:
             async with self._sem:
                 started_at = utc_now()
+                wall_start = time.monotonic()
                 await self._mark_started(voyage_id, started_at)
                 with _tracer.start_as_current_span(
                     "voyage.job", attributes={"voyage.id": voyage_id}
@@ -130,13 +149,20 @@ class JobRegistry:
             await self._mark_completed(voyage_id, "done")
             _completed.add(1, {"status": "done"})
         except asyncio.CancelledError:
+            status_label = "cancelled"
             await self._mark_completed(voyage_id, "cancelled")
             _completed.add(1, {"status": "cancelled"})
             raise
         except Exception as exc:
+            status_label = "failed"
             await self._mark_failed(voyage_id, exc)
             _completed.add(1, {"status": "failed"})
         finally:
+            if started_at is not None:
+                _duration.record(
+                    time.monotonic() - wall_start,
+                    {"status": status_label},
+                )
             async with self._task_lock:
                 self._tasks.pop(voyage_id, None)
 
@@ -169,6 +195,7 @@ class JobRegistry:
             stage = exc.stage
             detail = exc.detail or detail
 
+        _failures.add(1, {"error_code": code})
         log.error(
             "jobs.failed",
             voyage_id=voyage_id,
@@ -227,6 +254,13 @@ class JobRegistry:
 # ---------------------------------------------------------------------------
 
 
+# Per-voyage stage entry timestamps, keyed by (voyage_id, stage). Read on
+# transition-out to record `bv.jobs.stage_duration_seconds`; entries are
+# popped as they're consumed so the dict self-cleans during a normal run
+# and the stale rows cost ~hundreds of bytes if a worker dies mid-stage.
+_stage_entry_at: dict[tuple[str, str], float] = {}
+
+
 async def set_stage(voyage_id: str, stage: str, *, pct: float = 0.0, detail: str | None = None) -> None:
     """Flip `status` + write an initial progress blob for the stage."""
     async with session_scope() as session:
@@ -236,6 +270,11 @@ async def set_stage(voyage_id: str, stage: str, *, pct: float = 0.0, detail: str
         prev = row.status
         row.status = stage
         row.progress_json = json.dumps({"stage": stage, "pct": pct, "detail": detail})
+    now = time.monotonic()
+    entry = _stage_entry_at.pop((voyage_id, prev), None)
+    if entry is not None and prev in LIVE_STAGES:
+        _stage_duration.record(now - entry, {"stage": prev})
+    _stage_entry_at[(voyage_id, stage)] = now
     _stage_transitions.add(1, {"from": prev, "to": stage})
     log.info("jobs.stage", voyage_id=voyage_id, stage=stage, pct=pct, detail=detail)
 

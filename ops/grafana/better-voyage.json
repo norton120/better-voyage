@@ -300,7 +300,7 @@
       "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
       "targets": [
         {
-          "expr": "sum by (source) (rate(bv_summary_rendered_total[5m]))",
+          "expr": "sum by (source) (rate(bv_summary_requests_total[5m]))",
           "legendFormat": "{{source}}",
           "refId": "A"
         }
