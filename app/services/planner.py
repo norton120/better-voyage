@@ -6,8 +6,12 @@ across the request window, routes every candidate in parallel under a
 bounded executor, scores survivors, and emits the top-N as a
 multi-`<rte>` GPX blob.
 
-Chart data is still stubbed by `NullChartStore` — real ENC / OSM /
-GEBCO ingest lands next (plan/15-charts-bathymetry).
+Chart data goes through `ChartStore` (plan/15-charts-bathymetry):
+`_stage_charts_fetching` calls `ensure_coverage` to fetch + preprocess
+NOAA ENC cells and an OSM extract, loads the GEBCO slice, and builds
+per-layer STRtrees. `ChartsCoverageError` / `ChartsFetchError` map to
+`CHARTS_NOT_AVAILABLE` / `CHARTS_FETCH_FAILED` terminal failures.
+Tests use `NullChartStore` via `BV_CHART_STORE_MODE=null`.
 """
 
 from __future__ import annotations
@@ -27,7 +31,14 @@ from app.models.voyage import Voyage
 from app.observability import meter, tracer
 from app.schemas.request import VoyageRequest
 from app.services import boat_profiles
-from app.services.charts import NullChartStore
+from app.services.charts import (
+    ChartCoverage,
+    ChartsCoverageError,
+    ChartsFetchError,
+    NullChartStore,
+    get_chart_store,
+)
+from app.services.charts import ChartStore as _ChartStore
 from app.services.contingency import (
     BackupDestination,
     EscapeHatch,
@@ -43,7 +54,6 @@ from app.services.jobs import set_stage, write_progress
 from app.services.polars import Polar
 from app.services.router import (
     BoatLimits,
-    IsochronePoint,
     RouterError,
     RouteResult,
     plan_candidate,
@@ -119,7 +129,8 @@ class PlanState:
     # Stashed during routing for reuse in contingency generation.
     polar: Polar | None = None
     boat: BoatLimits | None = None
-    charts: NullChartStore | None = None
+    charts: _ChartStore | NullChartStore | None = None
+    charts_coverage: ChartCoverage | None = None
 
 
 def _bbox_from_request(req: VoyageRequest, pad_deg: float = 0.5) -> tuple[float, float, float, float]:
@@ -184,13 +195,45 @@ def _is_night_local(t: datetime, tz: ZoneInfo) -> bool:
 
 
 async def _stage_charts_fetching(state: PlanState) -> None:
-    await set_stage(state.voyage_id, "charts_fetching", pct=0.0, detail="null-chart-store")
-    with _tracer.start_as_current_span("job.charts_fetching"):
-        await asyncio.sleep(0)
+    """Fetch + preprocess chart data for the voyage bbox (plan/15).
+
+    The `charts_fetching` and `charts_preprocessing` stages are driven
+    by a single `ChartStore.ensure_coverage` call — the store does its
+    own fetch → preprocess pipeline internally. We split the two
+    stages for trace-topology parity with plan/16: `charts_fetching`
+    covers ensure_coverage end-to-end, `charts_preprocessing` is a
+    noop placeholder that set_stage's for the stage_transitions metric.
+    """
+    await set_stage(state.voyage_id, "charts_fetching", pct=0.0, detail="ensure_coverage")
+    store = get_chart_store()
+    state.charts = store
+    bbox = _bbox_from_request(state.req)
+    with _tracer.start_as_current_span(
+        "job.charts_fetching",
+        attributes={
+            "voyage.id": state.voyage_id,
+            "charts.store": store.__class__.__name__,
+        },
+    ):
+        try:
+            await store.ensure_coverage(bbox)
+        except ChartsCoverageError as exc:
+            raise PlannerError(
+                "CHARTS_NOT_AVAILABLE", "charts_fetching", str(exc)[:400]
+            ) from exc
+        except ChartsFetchError as exc:
+            raise PlannerError(
+                "CHARTS_FETCH_FAILED", "charts_fetching", str(exc)[:400]
+            ) from exc
+    state.charts_coverage = await store.coverage(bbox)
+    await _write_coverage(state)
+    await write_progress(state.voyage_id, "charts_fetching", 1.0)
 
 
 async def _stage_charts_preprocessing(state: PlanState) -> None:
-    await set_stage(state.voyage_id, "charts_preprocessing", pct=0.0, detail="null-chart-store")
+    """Stage boundary for traces + metrics; real preprocessing happens
+    inside `ensure_coverage` in the previous stage."""
+    await set_stage(state.voyage_id, "charts_preprocessing", pct=1.0, detail="done")
     with _tracer.start_as_current_span("job.charts_preprocessing"):
         await asyncio.sleep(0)
 
@@ -219,10 +262,11 @@ async def _route_one(
     depart_at: datetime,
     state: PlanState,
     polar: Polar,
-    charts: NullChartStore,
+    charts: _ChartStore | NullChartStore,
     boat: BoatLimits,
     sem: asyncio.Semaphore,
 ) -> tuple[datetime, RouteResult | None, str | None]:
+    assert state.forecast is not None, "forecast prefetched before routing"
     async with sem:
         try:
             result = await asyncio.to_thread(
@@ -267,10 +311,14 @@ async def _stage_routing(state: PlanState) -> None:
         max_seas_m=profile.max_seas_m,
     )
 
-    charts = NullChartStore()
+    charts = state.charts
+    if charts is None:
+        # Defensive: charts_fetching should have set this. Fall back to
+        # the null stub so we don't crash on the singleton miss.
+        charts = NullChartStore()
+        state.charts = charts
     state.polar = polar
     state.boat = boat
-    state.charts = charts
     departures = enumerate_departures(state.req)
     _candidates_total.add(len(departures))
 
@@ -377,7 +425,7 @@ def _coverage_payload(state: PlanState) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "forecast": "open-meteo-marine",
         "tides": None,
-        "charts": {"source": "null-chart-store"},
+        "charts": _charts_coverage_block(state),
         "skipped": dict(state.skipped),
         "candidates_surfaced": len(state.candidates),
     }
@@ -392,6 +440,24 @@ def _coverage_payload(state: PlanState) -> dict[str, Any]:
             "escape_hatch_routes": sum(len(c.escape_hatches) for c in state.candidates),
         }
     return payload
+
+
+def _charts_coverage_block(state: PlanState) -> dict[str, Any]:
+    """Per plan/15 §Coverage block + plan/10 §voyage.bv:coverage.charts."""
+    cov = state.charts_coverage
+    if cov is None:
+        # charts_fetching stage didn't run (e.g. NullChartStore path or
+        # early failure); surface a marker the UI can skip rendering.
+        if isinstance(state.charts, NullChartStore):
+            return {"source": "null-chart-store"}
+        return {"source": "unknown"}
+    return {
+        "enc_cells": cov.enc_cells,
+        "osm_extracts": cov.osm_extracts,
+        "gebco_tile": cov.gebco_tile,
+        "fetched_at": cov.fetched_at.isoformat() if cov.fetched_at else None,
+        "tide_modulated_depth": cov.tide_modulated_depth,
+    }
 
 
 async def _write_coverage(state: PlanState) -> None:

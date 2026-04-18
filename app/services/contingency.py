@@ -27,13 +27,13 @@ from app.services.pois import query as query_pois
 from app.services.router import (
     BoatLimits,
     IsochronePoint,
-    RouteResult,
     RouterError,
+    RouteResult,
     plan_candidate,
 )
 
 if TYPE_CHECKING:
-    from app.services.charts import ChartStore
+    from app.services.charts import ChartStoreProtocol as ChartStore
     from app.services.forecast_field import ForecastField
     from app.services.polars import Polar
 

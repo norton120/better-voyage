@@ -37,7 +37,7 @@ from app.observability import meter
 from app.services.geo import advance, bearing_deg, distance_nm, relative_wind_angle
 
 if TYPE_CHECKING:
-    from app.services.charts import ChartStore
+    from app.services.charts import ChartStoreProtocol as ChartStore
     from app.services.forecast_field import Env, ForecastField
     from app.services.polars import Polar
 

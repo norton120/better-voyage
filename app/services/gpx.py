@@ -24,7 +24,10 @@ from typing import TYPE_CHECKING
 import gpxpy
 import gpxpy.gpx
 
+from app.config import get_settings
+
 if TYPE_CHECKING:
+    from app.services.charts import Waypoint as ChartWaypoint
     from app.services.contingency import (
         BackupDestination,
         EscapeHatch,
@@ -70,6 +73,9 @@ def emit_voyage(state: PlanState) -> bytes:
         for h in c.escape_hatches:
             gpx.routes.append(_escape_hatch_route(c, h))
 
+    for wp in _navaids_for_routes(state):
+        gpx.waypoints.append(wp)
+
     return gpx.to_xml(version="1.1", prettyprint=True).encode("utf-8")
 
 
@@ -79,9 +85,76 @@ def emit_voyage(state: PlanState) -> bytes:
 
 
 def _coverage_element(state: PlanState) -> ET.Element | None:
-    if state.forecast_stale_at is None:
+    """Per plan/15 §Coverage block + plan/10 §voyage.bv:coverage.charts."""
+    attrs: dict[str, str] = {}
+    if state.forecast_stale_at is not None:
+        attrs["forecastStaleAt"] = state.forecast_stale_at.isoformat()
+    cov = state.charts_coverage
+    if cov is not None:
+        attrs["encCells"] = str(cov.enc_cells)
+        attrs["osmExtracts"] = str(cov.osm_extracts)
+        if cov.gebco_tile is not None:
+            attrs["gebcoTile"] = cov.gebco_tile
+        if cov.fetched_at is not None:
+            attrs["fetchedAt"] = cov.fetched_at.isoformat()
+        attrs["tideModulatedDepth"] = "true" if cov.tide_modulated_depth else "false"
+    if not attrs:
         return None
-    return _bv("coverage", {"forecastStaleAt": state.forecast_stale_at.isoformat()})
+    return _bv("coverage", attrs)
+
+
+def _navaids_for_routes(state: PlanState) -> list[gpxpy.gpx.GPXWaypoint]:
+    """Emit `<wpt>` for navaids within `BV_NAVAID_BBOX_PAD_NM` of any leg.
+
+    Delegates to `ChartStore.navaids_in(bbox)` — the bbox is the padded
+    envelope of every rtept across every candidate primary route.
+    Escape-hatch routes are excluded since their waypoints already live
+    near the primary's navaid set.
+    """
+    store = state.charts
+    if store is None or not state.candidates:
+        return []
+    try:
+        navaids_in = store.navaids_in  # Protocol duck-type
+    except AttributeError:
+        return []
+    all_pts = [pt for c in state.candidates for pt in c.route.points]
+    if not all_pts:
+        return []
+    lat_min = min(pt.lat for pt in all_pts)
+    lat_max = max(pt.lat for pt in all_pts)
+    lon_min = min(pt.lon for pt in all_pts)
+    lon_max = max(pt.lon for pt in all_pts)
+    # Convert BV_NAVAID_BBOX_PAD_NM to degrees. 1 nm ≈ 1/60 deg lat; lon
+    # scale varies with latitude but for the padding envelope rough is fine.
+    pad_nm = get_settings().navaid_bbox_pad_nm
+    pad_deg = pad_nm / 60.0
+    bbox = (
+        lat_min - pad_deg,
+        lon_min - pad_deg,
+        lat_max + pad_deg,
+        lon_max + pad_deg,
+    )
+    seen: set[tuple[float, float]] = set()
+    out: list[gpxpy.gpx.GPXWaypoint] = []
+    for n in navaids_in(bbox):
+        key = (round(n.lat, 6), round(n.lon, 6))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(_navaid_waypoint(n))
+    return out
+
+
+def _navaid_waypoint(n: ChartWaypoint) -> gpxpy.gpx.GPXWaypoint:
+    wp = gpxpy.gpx.GPXWaypoint(latitude=n.lat, longitude=n.lon)
+    if n.name:
+        wp.name = n.name
+    if n.sym:
+        wp.symbol = n.sym
+    if n.desc:
+        wp.description = n.desc
+    return wp
 
 
 def _candidate_route(state: PlanState, c: Candidate) -> gpxpy.gpx.GPXRoute:

@@ -46,6 +46,20 @@ class Settings(BaseSettings):
     summary_timeout_s: float = 10.0
     summary_prompt_version: str = "v1"
 
+    # Charts (plan/15-charts-bathymetry)
+    charts_dir: Path = Field(default=Path("./data/charts"))
+    gebco_path: Path | None = None
+    shallow_cutoff_m: float = 2.0
+    charts_max_age_days: int = 90
+    navaid_bbox_pad_nm: float = 2.0
+    tide_modulated_depth: bool = False
+    tide_interpolation_radius_nm: float = 25.0
+    noaa_enc_catalog_url: str = "https://charts.noaa.gov/ENCs/ENCProdCat.xml"
+    overpass_base_url: str = "https://overpass-api.de/api/interpreter"
+    # "real" = download + preprocess per plan/15; "null" = development
+    # stub that treats the planet as navigable water (tests + offline).
+    chart_store_mode: Literal["real", "null"] = "real"
+
     # Observability — see plan/14-observability.md
     otel_service_name: str = "better-voyage"
     otel_exporter: Literal["console", "otlp", "none"] = "console"

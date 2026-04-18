@@ -70,13 +70,24 @@ chart sources can't cover the bbox.*
 
 - [x] `Dockerfile` installs `gdal-bin libgdal-dev libspatialite-dev`
 
-- [ ] `services/charts.py` — `ChartStore` with `ensure_coverage`,
-  
-      per-bbox lock, preprocessing pipeline
+- [x] `services/charts.py` — `ChartStore` with `ensure_coverage`,
+      per-bbox `asyncio.Lock`, fetch→preprocess→STRtree pipeline.
+      `NullChartStore` stays for unit tests; production flips to real
+      via `BV_CHART_STORE_MODE=real`. `CHARTS_NOT_AVAILABLE` /
+      `CHARTS_FETCH_FAILED` surface through `PlannerError`
+      (`app/services/charts.py`).
 
-- [ ] NOAA ENC reader (S-57 via `pyogrio`) → preprocessed GeoJSON
+- [x] NOAA ENC reader (S-57 via `pyogrio`) → preprocessed GeoJSON
+      (`app/services/charts_enc.py` — reads LNDARE / COALNE / DEPARE /
+      OBSTRN / WRECKS / UWTROC / RESARE / CTNARE / MARCUL / BOYLAT /
+      BCNLAT / LIGHTS / BRIDGE; maps S-57 COLOUR codes to OpenCPN sym
+      names. Tests in `tests/unit/test_charts_enc.py`.)
 
-- [ ] OpenSeaMap reader (`pyosmium`) → preprocessed GeoJSON
+- [x] OpenSeaMap reader (`osmium` — the former `pyosmium` 4.x) →
+      preprocessed GeoJSON (`app/services/charts_osm.py` — lifts
+      `natural=coastline`, `seamark:type=(buoy_*|beacon_*|light_*|wreck|
+      rock|obstruction|restricted_area|marine_farm)`. Tests in
+      `tests/unit/test_charts_osm.py`.)
 
 - [x] GEBCO reader (`xarray`) → in-memory bathymetry
       (`app/services/gebco.py` — `load_gebco_bbox(path, bbox)` slices a
@@ -86,11 +97,19 @@ chart sources can't cover the bbox.*
       Tests in `tests/unit/test_gebco.py`. ChartStore integration lands
       with the remaining chart ingest work.)
 
-- [ ] `python -m app.charts fetch --bbox|--region` CLI
+- [x] `python -m app.charts fetch --bbox|--region` CLI
+      (`app/charts/cli.py` — sync wrapper over `ChartStore.ensure_coverage`;
+      exit codes 0/2/3/64; named regions for the common US boating bays.)
 
-- [ ] Coverage policy: hard-fail with `CHARTS_NOT_AVAILABLE` on gaps
+- [x] Coverage policy: hard-fail with `CHARTS_NOT_AVAILABLE` on gaps
+      (`ChartStore._coverage_gaps` returns the request bbox minus the
+      union of loaded source bboxes; planner maps
+      `ChartsCoverageError` → `PlannerError("CHARTS_NOT_AVAILABLE")`.)
 
-- [ ] Charts spans + metrics (`bv.charts.*`)
+- [x] Charts spans + metrics (`bv.charts.*` — `ensure_coverage`,
+      `fetch`, `load`, `preprocess` spans; `bv.charts.queries{kind}`,
+      `cells_loaded`, `fetch_bytes{source}`, `fetch_seconds{source}`,
+      `query_duration_seconds{kind}` metrics.)
 
 **Forecast + router + scoring** ✅ (charts use NullChartStore stub)
 
@@ -169,10 +188,12 @@ anchorages; navaids appear in the emitted GPX.*
       (`bv:contingencyKind=escape_hatch_route`, `bv:parentRtept`,
       `bv:trigger`)
 
-- [ ] Navaids from `ChartStore.navaids_in(bbox)` emitted as `<wpt>`
-  
-      within `NAVAID_BBOX_PAD_NM` of any route leg (blocked on M2
-      chart ingest)
+- [x] Navaids from `ChartStore.navaids_in(bbox)` emitted as `<wpt>`
+      within `BV_NAVAID_BBOX_PAD_NM` of any route leg
+      (`app/services/gpx.py::_navaids_for_routes` — bbox is the padded
+      envelope of every candidate's rtepts; dedup by `(lat,lon)`
+      rounded to 6 dp. Covered by the real-mode integration test
+      `test_real_chart_store_runs_end_to_end`.)
 
 - [x] Metrics: `bv.contingencies.emitted{kind}`
       (`kind ∈ backup_destination|tap_out|escape_hatch_route`)

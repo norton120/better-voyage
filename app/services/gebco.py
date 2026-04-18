@@ -45,10 +45,35 @@ class GebcoBathymetry:
     `elevation` is an xarray DataArray with (`lat`, `lon`) dims and
     meters-above-geoid values. The slice covers `bbox` inclusive; points
     outside return `None` from `depth()`.
+
+    The hot `depth(lat, lon)` path does a direct numpy bilinear
+    interpolation — `xarray.interp` is ~100x slower per call because
+    of coordinate alignment overhead, and the router calls this
+    millions of times per voyage.
     """
 
     elevation: xr.DataArray
     bbox: Bbox
+
+    def __post_init__(self) -> None:
+        # Snapshot grid coordinates as plain numpy arrays for the hot
+        # path. Using an increasing sort lets `searchsorted` locate
+        # bracketing cells in O(log n) without xarray's per-call setup.
+        arr = self.elevation
+        lats = arr.coords["lat"].values.astype(np.float64, copy=False)
+        lons = arr.coords["lon"].values.astype(np.float64, copy=False)
+        vals = arr.values.astype(np.float64, copy=False)
+        if lats.size > 1 and lats[1] < lats[0]:
+            lats = lats[::-1]
+            vals = vals[::-1, :]
+        if lons.size > 1 and lons[1] < lons[0]:
+            lons = lons[::-1]
+            vals = vals[:, ::-1]
+        # Stash on private attrs — dataclass(frozen=False) so assignment
+        # works; leave the xarray view alone for anyone who wants it.
+        object.__setattr__(self, "_lats", lats)
+        object.__setattr__(self, "_lons", lons)
+        object.__setattr__(self, "_vals", vals)
 
     def covers(self, bbox: Bbox) -> bool:
         """True iff `bbox` is fully inside the loaded slice."""
@@ -70,17 +95,37 @@ class GebcoBathymetry:
         lat_min, lon_min, lat_max, lon_max = self.bbox
         if not (lat_min <= lat <= lat_max and lon_min <= lon <= lon_max):
             return None
-        # xarray's .interp with method="linear" does the bilinear math.
-        # We drop the coordinate scalars and read the value.
-        val = self.elevation.interp(
-            lat=lat, lon=lon, method="linear"
-        ).values
-        if np.isnan(val):
+        lats = self._lats
+        lons = self._lons
+        vals = self._vals
+        # Locate bracketing cell. searchsorted returns the insertion
+        # index — j means lats[j-1] <= lat <= lats[j].
+        j = int(np.searchsorted(lats, lat))
+        i = int(np.searchsorted(lons, lon))
+        if j == 0:
+            j = 1
+        elif j >= lats.size:
+            j = lats.size - 1
+        if i == 0:
+            i = 1
+        elif i >= lons.size:
+            i = lons.size - 1
+        lat0, lat1 = lats[j - 1], lats[j]
+        lon0, lon1 = lons[i - 1], lons[i]
+        v00 = vals[j - 1, i - 1]
+        v01 = vals[j - 1, i]
+        v10 = vals[j, i - 1]
+        v11 = vals[j, i]
+        if np.isnan(v00) or np.isnan(v01) or np.isnan(v10) or np.isnan(v11):
             return None
-        elevation_m = float(val)
+        tlat = 0.0 if lat1 == lat0 else (lat - lat0) / (lat1 - lat0)
+        tlon = 0.0 if lon1 == lon0 else (lon - lon0) / (lon1 - lon0)
+        a = v00 * (1 - tlon) + v01 * tlon
+        b = v10 * (1 - tlon) + v11 * tlon
+        elevation_m = a * (1 - tlat) + b * tlat
         if elevation_m >= 0.0:
             return None
-        return -elevation_m
+        return float(-elevation_m)
 
 
 def load_gebco_bbox(path: Path, bbox: Bbox) -> GebcoBathymetry:
