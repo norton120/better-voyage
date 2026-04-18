@@ -45,3 +45,22 @@ class StationsCache(Base):
     name: Mapped[str] = mapped_column(String)
     payload: Mapped[str] = mapped_column(Text)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class SummaryCache(Base):
+    """NL summary cache (plan/08-nl-summary.md §Caching).
+
+    Keyed by sha256(digest_json + prompt_version + model_id). Same TTL
+    as forecast cache — when the forecast moves, the digest changes,
+    so old summaries are irrelevant anyway.
+    """
+
+    __tablename__ = "summary_cache"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    model: Mapped[str] = mapped_column(String)
+    summary_md: Mapped[str] = mapped_column(Text)
+    tokens_in: Mapped[int] = mapped_column(default=0)
+    tokens_out: Mapped[int] = mapped_column(default=0)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

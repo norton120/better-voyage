@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     progress_min_pct_delta: float = 0.05
     progress_min_interval_s: float = 2.0
 
+    # NL summary (plan/08-nl-summary.md)
+    summary_mode: Literal["llm", "fallback_only"] = "llm"
+    summary_model: str = "claude-haiku-4-5"
+    summary_max_tokens: int = 150
+    summary_temperature: float = 0.3
+    summary_timeout_s: float = 10.0
+    summary_prompt_version: str = "v1"
+
     # Observability — see plan/14-observability.md
     otel_service_name: str = "better-voyage"
     otel_exporter: Literal["console", "otlp", "none"] = "console"

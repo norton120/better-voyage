@@ -46,6 +46,7 @@ from app.services.router import (
     plan_candidate,
 )
 from app.services.scorer import Score, score_candidate
+from app.services.summary import Summary, summarize
 
 log = get_logger(__name__)
 _tracer = tracer("app.services.planner")
@@ -97,6 +98,7 @@ class Candidate:
     backup_destinations: list[BackupDestination] = field(default_factory=list)
     # Map from rtept index within route.points to its tap-out list.
     tapouts_by_index: dict[int, list[TapOut]] = field(default_factory=dict)
+    summary: Summary | None = None
 
 
 @dataclass
@@ -327,9 +329,10 @@ async def _stage_scoring(state: PlanState) -> None:
 
 
 async def _stage_finalizing(state: PlanState) -> None:
-    await set_stage(state.voyage_id, "finalizing", pct=0.0, detail="contingencies + gpx")
+    await set_stage(state.voyage_id, "finalizing", pct=0.0, detail="contingencies + summary + gpx")
     with _tracer.start_as_current_span("job.finalizing"):
         _derive_contingencies(state)
+        await _render_summaries(state)
         gpx = _emit_gpx(state)
         coverage = json.dumps(
             {
@@ -359,6 +362,14 @@ def _derive_contingencies(state: PlanState) -> None:
             idx = c.route.points.index(p)
             by_index[idx] = find_tapouts(p)
         c.tapouts_by_index = by_index
+
+
+async def _render_summaries(state: PlanState) -> None:
+    """Generate one 1-3 sentence recap per surfaced candidate."""
+    for c in state.candidates:
+        c.summary = await summarize(
+            candidate=c, req=state.req, tz_name=state.req.window.tz
+        )
 
 
 # --- GPX emission --------------------------------------------------------
@@ -424,6 +435,14 @@ def _emit_gpx(state: PlanState) -> bytes:
             )
             backup_xml = f"<bv:backupDestinations>{options}</bv:backupDestinations>"
 
+        summary_xml = ""
+        if c.summary is not None:
+            summary_xml = (
+                f'<bv:summaryMd source="{escape(c.summary.source)}">'
+                f"{escape(c.summary.text)}"
+                "</bv:summaryMd>"
+            )
+
         rtes.append(
             "  <rte>\n"
             f"    <name>Candidate {c.rank}: {origin_label} -> {dest_label}</name>\n"
@@ -433,6 +452,7 @@ def _emit_gpx(state: PlanState) -> bytes:
             f'departAt="{c.depart_at.isoformat()}" '
             f'arriveAt="{c.route.reached_at.isoformat()}"/>'
             f'<bv:score total="{c.score.total:.2f}"/>'
+            f"{summary_xml}"
             f"{backup_xml}"
             "</extensions>\n"
             f"    {body_str}\n"

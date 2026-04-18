@@ -13,6 +13,7 @@ os.environ.setdefault("BV_ENV", "test")
 os.environ.setdefault("BV_DATABASE_URL", f"sqlite+aiosqlite:///{_BV_TMP}/test.db")
 os.environ.setdefault("BV_LOG_LEVEL", "WARNING")
 os.environ.setdefault("BV_OTEL_EXPORTER", "none")
+os.environ.setdefault("BV_SUMMARY_MODE", "fallback_only")
 
 
 @pytest.fixture(scope="session")
