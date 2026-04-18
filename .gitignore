@@ -31,15 +31,19 @@ htmlcov/
 .env.local
 .env.*.local
 
-# Local data
+# Local data (runtime only; app/data/ ships with the repo for polars,
+# POIs, prompts, etc. — see its subdirectories)
 data/
+!app/data/
+!app/data/**
 *.db
 *.sqlite
 *.sqlite3
 
-# Generated GPX
+# Generated GPX (but keep hand-curated data assets like app/data/pois.gpx)
 out/
 *.gpx
+!app/data/**/*.gpx
 
 # IDE
 .idea/
