@@ -27,7 +27,10 @@ def test_hourly_grid_over_3_hours() -> None:
     assert ts[-1] == end
 
 
-def test_single_point_window() -> None:
-    t = datetime(2026, 4, 18, 12, 0, tzinfo=UTC)
-    ts = enumerate_departures(_req(t, t))
-    assert ts == [t]
+def test_narrow_window_yields_single_departure() -> None:
+    from datetime import timedelta
+
+    start = datetime(2026, 4, 18, 12, 0, tzinfo=UTC)
+    # Less than an hour → only one departure at start.
+    ts = enumerate_departures(_req(start, start + timedelta(minutes=30)))
+    assert ts == [start]

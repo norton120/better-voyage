@@ -9,6 +9,7 @@ from app.logging import configure_logging, get_logger
 from app.observability import setup_observability
 from app.routers import boat_profiles, health, pois, voyages
 from app.services.boat_profiles import ensure_default_seeded
+from app.services.cache_pruner import run_forever as run_cache_pruner
 from app.services.jobs import JobRegistry
 from app.services.planner import run_job
 
@@ -26,8 +27,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await registry.sweep_crashed()
     app.state.registry = registry
 
+    import asyncio
+    import contextlib
+
+    pruner_task = asyncio.create_task(run_cache_pruner(), name="cache-pruner")
+    app.state.cache_pruner_task = pruner_task
+
     log.info("better-voyage.startup", version=__version__)
     yield
+    pruner_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await pruner_task
     await registry.shutdown()
     log.info("better-voyage.shutdown")
 
