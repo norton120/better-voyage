@@ -11,10 +11,18 @@ Pipeline per step `dt` (plan/04 §Core loop):
 3. Reject under hard wind / sea limits.
 4. Advance geodesically (boat speed along heading + current drift).
 5. Let the ChartStore reject land / obstacle / restricted / shallow.
-6. Prune the frontier into ≤N sectors by axis-aligned progress.
+6. Accumulate an objective-dependent cost on the new point.
+7. Prune the frontier into N sectors by axis-aligned progress, biased
+   by the point's accumulated cost.
 
 Terminates when any point reaches the destination within tolerance,
 or the step budget is exhausted.
+
+Objectives (plan/04 §Objective function) tune the pruning metric:
+
+- `fastest`      — no cost; progress alone wins.
+- `comfortable`  — wave_height squared and wind-over-20 accumulate.
+- `short_tacks`  — heading changes above 60° accumulate as maneuvers.
 """
 
 from __future__ import annotations
@@ -22,7 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from math import cos, radians
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from app.services.geo import advance, bearing_deg, distance_nm, relative_wind_angle
 
@@ -30,6 +38,9 @@ if TYPE_CHECKING:
     from app.services.charts import ChartStore
     from app.services.forecast_field import Env, ForecastField
     from app.services.polars import Polar
+
+
+Objective = Literal["fastest", "comfortable", "short_tacks"]
 
 
 @dataclass
@@ -50,6 +61,7 @@ class IsochronePoint:
     heading_deg: float | None = None
     bsp_kts: float = 0.0
     env: Env | None = None
+    accumulated_cost: float = 0.0
 
 
 @dataclass
@@ -57,6 +69,7 @@ class RouteResult:
     points: list[IsochronePoint]  # origin → destination, chronological
     reached_at: datetime
     steps_used: int
+    objective: Objective = "fastest"
     # Debug only; not part of the plan contract.
     isochrones: list[list[IsochronePoint]] = field(default_factory=list)
 
@@ -81,6 +94,36 @@ def heading_fan(
     return sorted(fine | coarse)
 
 
+# --- objective costs --------------------------------------------------------
+
+# How strongly accumulated cost biases the per-sector pruning choice.
+# Larger = objective cost matters more vs. raw progress. Keeping these low
+# ensures the frontier always advances.
+_OBJECTIVE_WEIGHT: dict[str, float] = {
+    "fastest": 0.0,
+    "comfortable": 0.25,
+    "short_tacks": 0.5,
+}
+
+
+def _leg_cost(
+    parent: IsochronePoint, heading_deg: float, env: Env, dt_hours: float, objective: str
+) -> float:
+    """Objective-specific cost increment for one leg (plan/04)."""
+    if objective == "comfortable":
+        wave_pen = 0.5 * (env.wave_height_m ** 2) * dt_hours
+        over20 = max(0.0, env.wind_speed_kts - 20.0)
+        wind_pen = 0.3 * over20 * dt_hours
+        return wave_pen + wind_pen
+    if objective == "short_tacks":
+        if parent.heading_deg is None:
+            return 0.0
+        diff = abs(heading_deg - parent.heading_deg)
+        diff = min(diff, 360.0 - diff)
+        return 1.0 if diff > 60.0 else 0.0
+    return 0.0
+
+
 # --- sector pruning ---------------------------------------------------------
 
 
@@ -88,12 +131,14 @@ def sector_prune(
     points: list[IsochronePoint],
     destination: tuple[float, float],
     n_sectors: int = 72,
+    objective: str = "fastest",
 ) -> list[IsochronePoint]:
     if not points:
         return []
     mean_lat = sum(p.lat for p in points) / len(points)
     mean_lon = sum(p.lon for p in points) / len(points)
     axis = bearing_deg(mean_lat, mean_lon, destination[0], destination[1])
+    weight = _OBJECTIVE_WEIGHT.get(objective, 0.0)
 
     buckets: dict[int, tuple[float, IsochronePoint]] = {}
     half_width = 90.0
@@ -108,10 +153,11 @@ def sector_prune(
             continue
         d = distance_nm(mean_lat, mean_lon, p.lat, p.lon)
         progress = d * cos(radians(rel))
+        metric = progress - weight * p.accumulated_cost
         s = int((rel + half_width) / sector_width)
         cur = buckets.get(s)
-        if cur is None or progress > cur[0]:
-            buckets[s] = (progress, p)
+        if cur is None or metric > cur[0]:
+            buckets[s] = (metric, p)
     return [p for _, p in buckets.values()]
 
 
@@ -121,9 +167,7 @@ def sector_prune(
 def _advance_with_current(
     lat: float, lon: float, heading: float, bsp_kts: float, env: Env, dt_hours: float
 ) -> tuple[float, float]:
-    # Boat's motion through water along heading.
     la, lo = advance(lat, lon, heading, bsp_kts * dt_hours)
-    # Current drift (treat `current_dir_deg` as flow-toward direction).
     if env.current_speed_kts > 1e-6:
         la, lo = advance(la, lo, env.current_dir_deg, env.current_speed_kts * dt_hours)
     return la, lo
@@ -141,6 +185,7 @@ def plan_candidate(
     forecast: ForecastField,
     charts: ChartStore,
     boat: BoatLimits,
+    objective: Objective = "fastest",
     step_minutes: int = 60,
     max_steps: int = 168,
     arrival_tolerance_nm: float = 0.5,
@@ -149,7 +194,8 @@ def plan_candidate(
     step_delta = timedelta(minutes=step_minutes)
 
     origin_point = IsochronePoint(
-        lat=origin[0], lon=origin[1], t=depart_at, parent=None, heading_deg=None, bsp_kts=0.0, env=None
+        lat=origin[0], lon=origin[1], t=depart_at, parent=None,
+        heading_deg=None, bsp_kts=0.0, env=None, accumulated_cost=0.0,
     )
     isochrones: list[list[IsochronePoint]] = [[origin_point]]
     no_coverage_frontier_count = 0
@@ -187,10 +233,12 @@ def plan_candidate(
                 if depth < boat.draft_m + boat.min_depth_m:
                     continue
 
+                new_cost = pt.accumulated_cost + _leg_cost(pt, h, env, step_h, objective)
                 frontier.append(
                     IsochronePoint(
                         lat=new_lat, lon=new_lon, t=t, parent=pt,
                         heading_deg=h, bsp_kts=bsp, env=env,
+                        accumulated_cost=new_cost,
                     )
                 )
 
@@ -201,22 +249,23 @@ def plan_candidate(
             continue
         no_coverage_frontier_count = 0
 
-        pruned = sector_prune(frontier, destination)
+        pruned = sector_prune(frontier, destination, objective=objective)
         if not pruned:
             pruned = frontier  # fall back — all were behind the centroid
         isochrones.append(pruned)
 
-        # Termination: any point inside arrival tolerance.
         for p in pruned:
             if distance_nm(p.lat, p.lon, destination[0], destination[1]) <= arrival_tolerance_nm:
                 final = IsochronePoint(
                     lat=destination[0], lon=destination[1], t=p.t,
                     parent=p, heading_deg=p.heading_deg, bsp_kts=p.bsp_kts, env=p.env,
+                    accumulated_cost=p.accumulated_cost,
                 )
                 return RouteResult(
                     points=_backtrack(final),
                     reached_at=p.t,
                     steps_used=step,
+                    objective=objective,
                     isochrones=isochrones,
                 )
 

@@ -167,6 +167,7 @@ async def _route_one(
                 forecast=state.forecast,
                 charts=charts,
                 boat=boat,
+                objective=state.req.objective,
                 step_minutes=60,
                 max_steps=168,
                 arrival_tolerance_nm=0.5,
