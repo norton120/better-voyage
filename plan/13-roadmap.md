@@ -117,10 +117,12 @@ chart sources can't cover the bbox.*
       `voyages.gpx_blob` during the `finalizing` stage (inlined in
       planner for now; standalone module + full XSD validation is M5)
 
-- [ ] Dedicated `bv.router.*` metrics (plan/router-spec) — spans are
-      wired via `job.routing` / `forecast.prefetch`; per-step histograms
-      (`bv.router.step_duration_seconds`, heading-fan size, isochrone
-      frontier size) still TODO
+- [x] Dedicated `bv.router.*` metrics: `bv.router.steps` (histogram),
+      `bv.router.propagations_per_step` (histogram),
+      `bv.router.wallclock_seconds` (histogram), `bv.router.outcomes`
+      (counter, labels: `outcome` ∈ `ok|timeout|no_coverage`,
+      `objective`). Spans on `job.routing` / `forecast.prefetch`
+      already wired.
 
 - [x] One completed routed candidate end-to-end over `/voyages`
 

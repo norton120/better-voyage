@@ -107,6 +107,95 @@ def test_router_raises_on_uncovered_origin() -> None:
         )
 
 
+def test_router_emits_bv_router_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Successful plan records steps, wallclock, per-step propagations
+    and an `ok` outcome counter increment."""
+    from app.services import router as router_mod
+
+    recorded: dict[str, list] = {"steps": [], "prop": [], "wall": [], "out": []}
+
+    class _Rec:
+        def __init__(self, bucket: str) -> None:
+            self.bucket = bucket
+
+        def record(self, v, labels=None) -> None:
+            recorded[self.bucket].append((v, labels))
+
+        def add(self, v, labels=None) -> None:
+            recorded[self.bucket].append((v, labels))
+
+    monkeypatch.setattr(router_mod, "_steps", _Rec("steps"))
+    monkeypatch.setattr(router_mod, "_propagations_per_step", _Rec("prop"))
+    monkeypatch.setattr(router_mod, "_wallclock", _Rec("wall"))
+    monkeypatch.setattr(router_mod, "_outcomes", _Rec("out"))
+
+    polar = Polar.load(DEFAULT_POLAR_PATH)
+    depart = datetime(2026, 4, 18, 12, 0, tzinfo=UTC)
+    field = _uniform_field(
+        lat_bounds=(38.3, 38.7),
+        lon_bounds=(-76.6, -75.9),
+        start=depart,
+        hours=24,
+        wind_kts=12.0,
+        wind_from_deg=180.0,
+    )
+    plan_candidate(
+        origin=(38.5, -76.5),
+        destination=(38.5, -76.07),
+        depart_at=depart,
+        polar=polar,
+        forecast=field,
+        charts=NullChartStore(),
+        boat=BoatLimits(),
+        step_minutes=30,
+        max_steps=48,
+        arrival_tolerance_nm=1.0,
+    )
+
+    assert len(recorded["steps"]) == 1
+    assert recorded["steps"][0][0] >= 1
+    assert len(recorded["wall"]) == 1
+    assert recorded["wall"][0][0] >= 0
+    assert len(recorded["prop"]) >= 1
+    # Outcome counter fires once with outcome=ok.
+    assert len(recorded["out"]) == 1
+    assert recorded["out"][0][1]["outcome"] == "ok"
+
+
+def test_router_outcome_timeout_recorded() -> None:
+    """A run that exhausts the step budget emits outcome=timeout."""
+    from unittest.mock import patch
+
+    polar = Polar.load(DEFAULT_POLAR_PATH)
+    depart = datetime(2026, 4, 18, 12, 0, tzinfo=UTC)
+    field = _uniform_field(
+        lat_bounds=(38.3, 38.7),
+        lon_bounds=(-76.6, -75.9),
+        start=depart,
+        hours=24,
+        wind_kts=12.0,
+        wind_from_deg=180.0,
+    )
+    with patch("app.services.router._outcomes") as mock_out:
+        with pytest.raises(RouterError, match="ROUTE_TIMEOUT"):
+            plan_candidate(
+                origin=(38.5, -76.5),
+                destination=(38.5, -76.07),
+                depart_at=depart,
+                polar=polar,
+                forecast=field,
+                charts=NullChartStore(),
+                boat=BoatLimits(),
+                step_minutes=30,
+                max_steps=1,  # force timeout before reaching destination
+                arrival_tolerance_nm=0.01,  # tight so 1 step can't land it
+            )
+        # Timeout increments the outcome counter once with outcome=timeout.
+        assert mock_out.add.call_count == 1
+        labels = mock_out.add.call_args.args[1]
+        assert labels["outcome"] == "timeout"
+
+
 def test_sector_prune_keeps_one_per_sector() -> None:
     from app.services.router import IsochronePoint
 

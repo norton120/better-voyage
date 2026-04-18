@@ -27,17 +27,42 @@ Objectives (plan/04 §Objective function) tune the pruning metric:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from math import cos, radians
 from typing import TYPE_CHECKING, Literal
 
+from app.observability import meter
 from app.services.geo import advance, bearing_deg, distance_nm, relative_wind_angle
 
 if TYPE_CHECKING:
     from app.services.charts import ChartStore
     from app.services.forecast_field import Env, ForecastField
     from app.services.polars import Polar
+
+
+_m = meter("app.services.router")
+_steps = _m.create_histogram(
+    "bv.router.steps",
+    description="Isochrone steps executed per plan_candidate call",
+    unit="1",
+)
+_propagations_per_step = _m.create_histogram(
+    "bv.router.propagations_per_step",
+    description="Number of new frontier points generated per isochrone step, pre-prune",
+    unit="1",
+)
+_wallclock = _m.create_histogram(
+    "bv.router.wallclock_seconds",
+    description="Wallclock duration of one plan_candidate call",
+    unit="s",
+)
+_outcomes = _m.create_counter(
+    "bv.router.outcomes",
+    description="Terminal outcome of a plan_candidate call",
+    unit="1",
+)
 
 
 Objective = Literal["fastest", "comfortable", "short_tacks"]
@@ -199,6 +224,8 @@ def plan_candidate(
     )
     isochrones: list[list[IsochronePoint]] = [[origin_point]]
     no_coverage_frontier_count = 0
+    t0 = time.monotonic()
+    outcome_labels = {"objective": objective}
 
     for step in range(1, max_steps + 1):
         t = depart_at + step * step_delta
@@ -242,9 +269,14 @@ def plan_candidate(
                     )
                 )
 
+        _propagations_per_step.record(len(frontier), outcome_labels)
+
         if not frontier:
             no_coverage_frontier_count += 1
             if no_coverage_frontier_count >= 3:
+                _steps.record(step, outcome_labels)
+                _wallclock.record(time.monotonic() - t0, outcome_labels)
+                _outcomes.add(1, {**outcome_labels, "outcome": "no_coverage"})
                 raise RouterError("ROUTE_NO_COVERAGE", detail=f"empty frontier at step {step}")
             continue
         no_coverage_frontier_count = 0
@@ -261,6 +293,9 @@ def plan_candidate(
                     parent=p, heading_deg=p.heading_deg, bsp_kts=p.bsp_kts, env=p.env,
                     accumulated_cost=p.accumulated_cost,
                 )
+                _steps.record(step, outcome_labels)
+                _wallclock.record(time.monotonic() - t0, outcome_labels)
+                _outcomes.add(1, {**outcome_labels, "outcome": "ok"})
                 return RouteResult(
                     points=_backtrack(final),
                     reached_at=p.t,
@@ -269,6 +304,9 @@ def plan_candidate(
                     isochrones=isochrones,
                 )
 
+    _steps.record(max_steps, outcome_labels)
+    _wallclock.record(time.monotonic() - t0, outcome_labels)
+    _outcomes.add(1, {**outcome_labels, "outcome": "timeout"})
     raise RouterError("ROUTE_TIMEOUT", detail=f"exhausted {max_steps} steps")
 
 
