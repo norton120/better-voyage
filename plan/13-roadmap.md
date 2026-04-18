@@ -180,9 +180,14 @@ renders cleanly in OpenCPN with primary + contingencies + navaids.*
 - [ ] Upgrade `services/gpx.py` from M2 stub: full `bv:` extensions
   
       round-trip on ingest + emit (foreign namespaces preserved)
-- [ ] Per-candidate and master file endpoints (`?candidate=<rank>`)
-- [ ] Deterministic element ordering (doc 09) for meaningful test diffs
-- [ ] Validation test against GPX 1.1 XSD
+- [x] Per-candidate and master file endpoints
+      (`GET /voyages/{id}/gpx?candidate=<rank>` — filters primary +
+      its escape-hatch `<rte>`s; 404 CANDIDATE_NOT_FOUND on miss)
+- [x] Deterministic element ordering (doc 09) — candidate primaries
+      emit in ascending `bv:candidate/@rank`, escape-hatch `<rte>`s
+      follow their parent; test asserts the invariant
+- [ ] Validation test against GPX 1.1 XSD (structural + well-formedness
+      check landed; full XSD validation comes with the M5 gpxpy rewrite)
 - [ ] Manual verification in OpenCPN
 
 ## M6 — NL summary (LLM) ✅

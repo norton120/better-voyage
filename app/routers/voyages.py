@@ -223,19 +223,77 @@ async def cancel_voyage(voyage_id: str, request: Request) -> CancelResponse:
     summary="Download the voyage GPX file",
     response_class=FastAPIResponse,
 )
-async def get_gpx(voyage_id: str) -> FastAPIResponse:
+async def get_gpx(
+    voyage_id: str,
+    candidate: int | None = Query(
+        None,
+        ge=1,
+        description="Filter to only this candidate's primary + escape-hatch routes",
+    ),
+) -> FastAPIResponse:
     row = await _load(voyage_id)
     if row.status != "done" or row.gpx_blob is None:
         raise HTTPException(
             status_code=404,
             detail={"code": "VOYAGE_NOT_READY", "status": row.status},
         )
-    filename = f"voyage-{row.id}.gpx"
+    blob = row.gpx_blob
+    suffix = ""
+    if candidate is not None:
+        blob = _filter_gpx_by_candidate(blob, candidate)
+        if blob is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "CANDIDATE_NOT_FOUND", "rank": candidate},
+            )
+        suffix = f"-candidate-{candidate}"
+    filename = f"voyage-{row.id}{suffix}.gpx"
     return FastAPIResponse(
-        content=row.gpx_blob,
+        content=blob,
         media_type="application/gpx+xml",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+def _filter_gpx_by_candidate(blob: bytes, rank: int) -> bytes | None:
+    """Drop every `<rte>` whose candidate rank doesn't match `rank`.
+
+    Primary routes carry `bv:candidate@rank`; escape-hatch routes
+    carry `bv:candidateRank@value`. Routes without either are kept
+    (they're voyage-global, e.g. future `<wpt>` navaids). Returns
+    `None` when no route survives, so the handler can 404.
+    """
+    import xml.etree.ElementTree as ET
+
+    ns_gpx = "http://www.topografix.com/GPX/1/1"
+    ns_bv = "https://better-voyage.app/gpx/1"
+    ET.register_namespace("", ns_gpx)
+    ET.register_namespace("bv", ns_bv)
+    root = ET.fromstring(blob)
+
+    kept_any = False
+    for rte in list(root.findall(f"{{{ns_gpx}}}rte")):
+        cand = rte.find(
+            f"{{{ns_gpx}}}extensions/{{{ns_bv}}}candidate"
+        )
+        escape_rank = rte.find(
+            f"{{{ns_gpx}}}extensions/{{{ns_bv}}}candidateRank"
+        )
+        attached_rank: int | None = None
+        if cand is not None and cand.get("rank") is not None:
+            attached_rank = int(cand.get("rank", "0"))
+        elif escape_rank is not None and escape_rank.get("value") is not None:
+            attached_rank = int(escape_rank.get("value", "0"))
+        if attached_rank is None:
+            continue  # global <rte>, keep
+        if attached_rank != rank:
+            root.remove(rte)
+        else:
+            kept_any = True
+
+    if not kept_any:
+        return None
+    return ET.tostring(root, encoding="UTF-8", xml_declaration=True)
 
 
 @router.get("/{voyage_id}/trace", summary="Progressively populated PlanTrace")
