@@ -13,6 +13,7 @@ from datetime import timedelta
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi.responses import Response as FastAPIResponse
 
 from app.clients.cache import as_aware_utc, utc_now
 from app.config import get_settings
@@ -201,6 +202,26 @@ async def cancel_voyage(voyage_id: str, request: Request) -> CancelResponse:
     await registry.cancel(row.id)
     row = await _load(voyage_id)
     return CancelResponse(id=row.id, status=row.status)  # type: ignore[arg-type]
+
+
+@router.get(
+    "/{voyage_id}/gpx",
+    summary="Download the voyage GPX file",
+    response_class=FastAPIResponse,
+)
+async def get_gpx(voyage_id: str) -> FastAPIResponse:
+    row = await _load(voyage_id)
+    if row.status != "done" or row.gpx_blob is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "VOYAGE_NOT_READY", "status": row.status},
+        )
+    filename = f"voyage-{row.id}.gpx"
+    return FastAPIResponse(
+        content=row.gpx_blob,
+        media_type="application/gpx+xml",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/{voyage_id}/trace", summary="Progressively populated PlanTrace")
