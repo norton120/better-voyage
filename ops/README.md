@@ -13,6 +13,36 @@ you're hunting a bug, reach for this first.
 
 OpenAPI is at `/docs`; liveness probe at `/health`.
 
+### Chart ingest prerequisites
+
+`POST /voyages` is blocking on the real ChartStore (plan/15) —
+`BV_CHART_STORE_MODE=real` is the default. Before the first voyage:
+
+1. **Download GEBCO** (once, ~8 GB) from
+   <https://www.gebco.net/data_and_products/gridded_bathymetry_data/>.
+   Pick the netCDF variant; stash the `.nc` somewhere readable by the
+   service. We do not redistribute it.
+2. **Point the service at it**:
+   ```bash
+   export BV_GEBCO_PATH=/abs/path/to/gebco_2024_sub_ice_topo.nc
+   export BV_CHARTS_DIR=./data/charts
+   ```
+   In Docker, add both to the `environment:` block for the `app`
+   service and mount the netCDF into the container.
+3. **Pre-seed chart cells** for your cruising area (recommended — the
+   first voyage otherwise pays the full NOAA ENC + Overpass download
+   on-demand):
+   ```bash
+   uv run python -m app.charts fetch --region chesapeake
+   # or: --bbox lat_min,lon_min,lat_max,lon_max
+   ```
+   Exit code 0 = coverage sealed, 2 = `CHARTS_NOT_AVAILABLE`, 3 =
+   `CHARTS_FETCH_FAILED`, 64 = bad CLI usage.
+
+For API-exploration only (no real routing), set
+`BV_CHART_STORE_MODE=null` — the planner uses a stub that treats the
+whole planet as navigable water. Never run production like this.
+
 ## Configuration
 
 All runtime knobs are `BV_*` env vars (see `app/config.py`). The ones
@@ -29,6 +59,13 @@ operators usually tune:
 | `BV_OTEL_EXPORTER`        | `console`                                        | `otlp` to ship to the compose lgtm stack, `none` to disable.      |
 | `BV_OTEL_ENDPOINT`        | `http://localhost:4318`                          | OTLP HTTP receiver.                                               |
 | `BV_LOG_LEVEL`            | `INFO` (`DEBUG` in compose)                      | Structlog root level.                                             |
+| `BV_CHART_STORE_MODE`     | `real`                                           | `null` for API smoke-tests without chart ingest (no real routing).|
+| `BV_GEBCO_PATH`           | unset                                            | Absolute path to the GEBCO netCDF. Required when mode = `real`.   |
+| `BV_CHARTS_DIR`           | `./data/charts`                                  | ENC / OSM cache root; pre-seed with `python -m app.charts fetch`. |
+| `BV_CHARTS_MAX_AGE_DAYS`  | `90`                                             | Refresh cadence for cached ENC cells and OSM extracts.            |
+| `BV_SHALLOW_CUTOFF_M`     | `2.0`                                            | DEPARE polygons below this depth are treated as shallow hazards.  |
+| `BV_NAVAID_BBOX_PAD_NM`   | `2.0`                                            | How far off the routed legs to pull navaids into the emitted GPX. |
+| `BV_TIDE_MODULATED_DEPTH` | `false`                                          | Flip to `true` once the tide interpolator is validated (plan/15). |
 
 ## Data & cache
 
@@ -78,6 +115,9 @@ Symptom → where to look:
 | Voyage `failed` with `FORECAST_UNAVAILABLE` | Prefetch raised with no cache to fall back on. Check upstream reachability; look at `bv.cache.lookups{result="error"}`. |
 | Voyage `failed` with `WORKER_RESTARTED`   | Process restart during a live job. The crash-recovery sweep (`jobs.sweep_crashed`) marks the row; rerun to replan.  |
 | Voyage stuck in `forecast_prefetching`    | Open-Meteo slow or misbehaving. Look at the `forecast.prefetch` span for offending `(lat, lon)` calls.               |
+| Voyage `failed` with `CHARTS_NOT_AVAILABLE` | ENC + OSM can't cover the bbox, or no GEBCO configured. Check `BV_GEBCO_PATH`; pre-seed with `python -m app.charts fetch --bbox ...`. |
+| Voyage `failed` with `CHARTS_FETCH_FAILED`  | Transient network error hitting NOAA ENC catalog / Overpass. Retry; if persistent, inspect the `charts.fetch` span for the offending URL. |
+| Voyage stuck in `charts_fetching`         | First-run fetch of a big region. Typical latency 30 s – few minutes per ~1°×1° region. Pre-seed via CLI to eliminate the wait. |
 | Voyage stuck in `routing`                 | `bv.router.wallclock_seconds`, `bv.router.steps` — often paired with `bv.router.outcomes{outcome="timeout"}` spikes. |
 | NL summary always templated               | `bv.summary.rendered_total{source="fallback"}` dominant. Check Anthropic reachability or set `BV_SUMMARY_MODE=fallback_only` to stop trying. |
 | Cache pruner never runs                   | Lifespan startup log for `cache_pruner.started`. Pruner runs hourly via `run_forever`.                              |
@@ -89,6 +129,8 @@ Error-code reference (what the planner raises):
 | `INVALID_WINDOW`           | validation                | Request-shape problem (window duration, endpoint collision, start ≥ end).               |
 | `BOAT_PROFILE_NOT_FOUND`   | routing                   | The named profile doesn't exist.                                                        |
 | `INVALID_BOAT`             | routing                   | Polar file load failed.                                                                  |
+| `CHARTS_NOT_AVAILABLE`     | charts_fetching           | No combination of NOAA ENC + OSM covers the bbox, or GEBCO is unconfigured / missing.   |
+| `CHARTS_FETCH_FAILED`      | charts_fetching           | Upstream NOAA or Overpass error after retries. Retry later or pre-seed via the CLI.     |
 | `FORECAST_UNAVAILABLE`     | forecast_prefetching      | Prefetch raised; no usable cache rows to fall back on.                                  |
 | `ROUTE_BLOCKED`            | routing                   | Every candidate failed and no upstream was stale — suggests the voyage is infeasible.   |
 | `OFFLINE_NO_ROUTE`         | routing                   | Every candidate failed *and* at least one upstream served stale — likely offline gap.   |

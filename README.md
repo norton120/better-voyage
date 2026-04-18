@@ -28,6 +28,9 @@ docker compose up --build
 curl http://localhost:8000/health
 ```
 
+The API is live at this point, but `POST /voyages` needs chart data —
+see [Chart ingest setup](#chart-ingest-setup) below.
+
 ## Local development (uv)
 
 ```bash
@@ -38,15 +41,41 @@ uv run ruff check .
 uv run mypy app
 ```
 
+## Chart ingest setup
+
+`better-voyage` refuses to plan without real chart data (plan/15 —
+"real charts or no route"). Before the first voyage:
+
+1. Download GEBCO (~8 GB netCDF) from
+   <https://www.gebco.net/data_and_products/gridded_bathymetry_data/>.
+2. Point the service at it:
+   ```bash
+   export BV_GEBCO_PATH=/abs/path/to/gebco_2024_sub_ice_topo.nc
+   export BV_CHARTS_DIR=./data/charts
+   ```
+3. Pre-seed a cruising area (optional; first voyage otherwise pays the
+   full NOAA ENC + Overpass download on-demand):
+   ```bash
+   uv run python -m app.charts fetch --region chesapeake
+   # or: --bbox lat_min,lon_min,lat_max,lon_max
+   ```
+
+For API-exploration only (no real routing), set
+`BV_CHART_STORE_MODE=null`. The planner then uses a stub that treats
+the whole planet as navigable water — fine for poking at the HTTP
+surface, not for actual planning. Full reference in
+[`ops/README.md`](./ops/README.md).
+
 ## Layout
 
 ```
 app/        FastAPI application
+  charts/   `python -m app.charts` CLI (pre-seed chart cache)
   clients/  External API clients (Open-Meteo, NOAA)
   models/   SQLAlchemy ORM models
   routers/  HTTP endpoints
   schemas/  Pydantic request/response schemas
-  services/ Domain logic (scoring, planning, GPX)
+  services/ Domain logic (routing, charts, scoring, GPX, NL summary)
 ops/        Operator tooling
   grafana/  Dashboard JSON for the otel-lgtm Grafana stack
 tests/      Pytest suite
