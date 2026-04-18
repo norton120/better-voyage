@@ -259,7 +259,8 @@ end.*
       `otel-lgtm` image provisions. Import via Grafana UI; automated
       provisioning lands with ops docs)
 
-- [ ] Ops docs
+- [x] Ops docs (`ops/README.md` — runbook, error-code reference,
+      configuration cheat sheet, Grafana import steps)
 
 ## Stretch (post-MVP)
 
