@@ -44,8 +44,11 @@ async def _reset_http_client() -> AsyncIterator[None]:
 
 @pytest_asyncio.fixture
 async def client() -> AsyncIterator[AsyncClient]:
+    from asgi_lifespan import LifespanManager
+
     from app.main import app
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        yield ac
+    async with LifespanManager(app) as manager:
+        transport = ASGITransport(app=manager.app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac

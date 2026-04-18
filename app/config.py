@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     tide_cache_ttl_s: int = 60 * 60 * 24             # 24h for tide predictions
     stations_cache_ttl_s: int = 60 * 60 * 24 * 30    # 30d for station metadata
 
+    # Async jobs (plan/16-jobs-async.md)
+    max_concurrent_jobs: int = 2
+    progress_min_pct_delta: float = 0.05
+    progress_min_interval_s: float = 2.0
+
     # Observability — see plan/14-observability.md
     otel_service_name: str = "better-voyage"
     otel_exporter: Literal["console", "otlp", "none"] = "console"

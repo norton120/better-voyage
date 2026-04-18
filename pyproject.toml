@@ -29,6 +29,7 @@ dependencies = [
     "opentelemetry-instrumentation-sqlalchemy>=0.49b0",
     "opentelemetry-instrumentation-logging>=0.49b0",
     "greenlet>=3.4.0",
+    "python-ulid>=3.1.0",
 ]
 
 [project.optional-dependencies]
@@ -58,6 +59,7 @@ dev-dependencies = [
     "ruff>=0.7",
     "mypy>=1.13",
     "types-python-dateutil>=2.9",
+    "asgi-lifespan>=2.1.0",
 ]
 
 [tool.pytest.ini_options]

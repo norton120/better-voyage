@@ -5,5 +5,6 @@ Importing this package registers all models with `Base.metadata` so
 """
 
 from app.models.forecast import ForecastCache, StationsCache, TideCache
+from app.models.voyage import Voyage
 
-__all__ = ["ForecastCache", "StationsCache", "TideCache"]
+__all__ = ["ForecastCache", "StationsCache", "TideCache", "Voyage"]
