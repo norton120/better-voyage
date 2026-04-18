@@ -27,6 +27,7 @@ from app.schemas.response import (
     VoyageError,
     VoyageState,
 )
+from app.services import boat_profiles
 from app.services.jobs import (
     LIVE_STAGES,
     JobRegistry,
@@ -134,6 +135,11 @@ async def post_voyage(
     force: bool = Query(False, description="Replace any live voyage"),
 ) -> AcceptedResponse:
     registry = _registry(request)
+    if await boat_profiles.get(req.boat_profile_name) is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "BOAT_PROFILE_NOT_FOUND", "name": req.boat_profile_name},
+        )
     inputs_hash = compute_inputs_hash(req)
     existing = await find_existing()
 

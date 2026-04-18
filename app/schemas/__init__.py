@@ -1,3 +1,4 @@
+from app.schemas.boat_profile import BoatProfileIn, BoatProfileOut, BoatProfileSummary
 from app.schemas.request import (
     Coord,
     Objective,
@@ -18,6 +19,9 @@ from app.schemas.response import (
 
 __all__ = [
     "AcceptedResponse",
+    "BoatProfileIn",
+    "BoatProfileOut",
+    "BoatProfileSummary",
     "CancelResponse",
     "Coord",
     "Links",

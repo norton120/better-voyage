@@ -24,10 +24,11 @@ from app.logging import get_logger
 from app.models.voyage import Voyage
 from app.observability import meter, tracer
 from app.schemas.request import VoyageRequest
+from app.services import boat_profiles
 from app.services.charts import NullChartStore
 from app.services.forecast_field import ForecastField
 from app.services.jobs import set_stage, write_progress
-from app.services.polars import DEFAULT_POLAR_PATH, Polar
+from app.services.polars import Polar
 from app.services.router import (
     BoatLimits,
     IsochronePoint,
@@ -152,6 +153,7 @@ async def _route_one(
     state: PlanState,
     polar: Polar,
     charts: NullChartStore,
+    boat: BoatLimits,
     sem: asyncio.Semaphore,
 ) -> tuple[datetime, RouteResult | None, str | None]:
     async with sem:
@@ -164,7 +166,7 @@ async def _route_one(
                 polar=polar,
                 forecast=state.forecast,
                 charts=charts,
-                boat=BoatLimits(),
+                boat=boat,
                 step_minutes=60,
                 max_steps=168,
                 arrival_tolerance_nm=0.5,
@@ -179,7 +181,24 @@ async def _stage_routing(state: PlanState) -> None:
     if state.forecast is None:
         raise PlannerError("INTERNAL_ERROR", "routing", "forecast not prefetched")
 
-    polar = Polar.load(DEFAULT_POLAR_PATH)
+    profile = await boat_profiles.get(state.req.boat_profile_name)
+    if profile is None:
+        raise PlannerError(
+            "BOAT_PROFILE_NOT_FOUND", "routing", state.req.boat_profile_name
+        )
+    try:
+        polar = Polar.load(profile.polar_path)
+    except Exception as exc:
+        raise PlannerError(
+            "INVALID_BOAT", "routing", f"polar load failed: {exc}"
+        ) from exc
+    boat = BoatLimits(
+        draft_m=profile.draft_m,
+        min_depth_m=profile.min_depth_m,
+        max_wind_kts=profile.max_wind_kts,
+        max_seas_m=profile.max_seas_m,
+    )
+
     charts = NullChartStore()
     departures = enumerate_departures(state.req)
     _candidates_total.add(len(departures))
@@ -205,7 +224,7 @@ async def _stage_routing(state: PlanState) -> None:
 
         done = [0]
         async def _one(t: datetime) -> tuple[datetime, RouteResult | None, str | None]:
-            r = await _route_one(t, state, polar, charts, sem)
+            r = await _route_one(t, state, polar, charts, boat, sem)
             await _tick(len(departures), done)
             return r
 

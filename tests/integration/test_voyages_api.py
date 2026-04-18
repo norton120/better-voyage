@@ -73,7 +73,7 @@ def _payload(**overrides: Any) -> dict[str, Any]:
             "end_at": "2026-04-18T02:00:00Z",
             "tz": "UTC",
         },
-        "boat_profile_name": "saltbreaker",
+        "boat_profile_name": "default",
         "max_candidates": 2,
     }
     base.update(overrides)

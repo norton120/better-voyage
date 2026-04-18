@@ -7,7 +7,8 @@ from app import __version__
 from app.db import engine, init_db
 from app.logging import configure_logging, get_logger
 from app.observability import setup_observability
-from app.routers import health, voyages
+from app.routers import boat_profiles, health, voyages
+from app.services.boat_profiles import ensure_default_seeded
 from app.services.jobs import JobRegistry
 from app.services.planner import run_job
 
@@ -19,6 +20,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
     setup_observability(app=app, engine=engine)
     await init_db()
+    await ensure_default_seeded()
 
     registry = JobRegistry(runner=run_job)
     await registry.sweep_crashed()
@@ -39,3 +41,4 @@ app = FastAPI(
 
 app.include_router(health.router)
 app.include_router(voyages.router)
+app.include_router(boat_profiles.router)

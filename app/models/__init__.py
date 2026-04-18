@@ -4,7 +4,8 @@ Importing this package registers all models with `Base.metadata` so
 `create_all` / Alembic autogenerate see them.
 """
 
+from app.models.boat_profile import BoatProfile
 from app.models.forecast import ForecastCache, StationsCache, TideCache
 from app.models.voyage import Voyage
 
-__all__ = ["ForecastCache", "StationsCache", "TideCache", "Voyage"]
+__all__ = ["BoatProfile", "ForecastCache", "StationsCache", "TideCache", "Voyage"]
