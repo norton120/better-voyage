@@ -63,24 +63,27 @@ async def test_pipeline_emits_multi_rtept_gpx(client: AsyncClient, httpx_mock) -
         "origin": {"lat": 38.5, "lon": -76.5, "name": "Origin"},
         "destination": {"lat": 38.5, "lon": -76.07, "name": "Destination"},
         "window": {
+            # 3-hour window → 4 departure candidates routed in parallel.
             "start_at": "2026-04-18T00:00:00Z",
-            "end_at": "2026-04-18T23:00:00Z",
+            "end_at": "2026-04-18T03:00:00Z",
             "tz": "UTC",
         },
         "boat_profile_name": "default",
+        "max_candidates": 3,
     }
     resp = await client.post("/voyages", json=payload)
     assert resp.status_code == 202
     vid = resp.json()["id"]
 
-    # Wait for the pipeline to finish.
-    for _ in range(250):  # ~5 seconds total
+    body: dict | None = None
+    for _ in range(500):  # ~10 seconds
         state = await client.get(f"/voyages/{vid}")
         body = state.json()
         if body["status"] in {"done", "failed", "cancelled"}:
             break
         await asyncio.sleep(0.02)
-    assert body["status"] == "done", f"error={body.get('error')}"
+    assert body is not None
+    assert body["status"] == "done", f"final={body}"
     assert body["voyage"]["gpx_available"] is True
 
     # Pull the GPX blob directly from the DB (the /gpx endpoint is M5).
@@ -92,8 +95,10 @@ async def test_pipeline_emits_multi_rtept_gpx(client: AsyncClient, httpx_mock) -
     assert row is not None
     assert row.gpx_blob is not None
     text = row.gpx_blob.decode()
-    # The route should have more than just origin → destination — the
-    # isochrone search produces intermediate waypoints.
-    assert text.count("<rtept") >= 2
+    # Multi-candidate: one <rte> per surfaced candidate, each with
+    # many rtepts (origin, intermediate isochrone waypoints, destination).
+    assert text.count("<rte>") >= 2
+    assert text.count("<rtept") >= 4
     assert '<bv:score total=' in text
+    assert '<bv:candidate rank="1"' in text
     assert 'xmlns:bv="https://better-voyage.app/gpx/1"' in text

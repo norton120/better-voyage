@@ -63,17 +63,18 @@ def _register_open_meteo_mocks(httpx_mock: Any) -> None:
 
 
 def _payload(**overrides: Any) -> dict[str, Any]:
-    # Short east-bound hop so the router terminates inside the test's
-    # 24-hour mocked forecast window.
+    # Short east-bound hop with a narrow departure window so the planner
+    # enumerates only a few candidates during tests.
     base: dict[str, Any] = {
         "origin": {"lat": 38.5, "lon": -76.5, "name": "Origin"},
         "destination": {"lat": 38.5, "lon": -76.07, "name": "Destination"},
         "window": {
             "start_at": "2026-04-18T00:00:00Z",
-            "end_at": "2026-04-18T23:00:00Z",
+            "end_at": "2026-04-18T02:00:00Z",
             "tz": "UTC",
         },
         "boat_profile_name": "saltbreaker",
+        "max_candidates": 2,
     }
     base.update(overrides)
     return base

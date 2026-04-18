@@ -1,15 +1,13 @@
 """Voyage planner — drives a submission through the job stages.
 
 `JobRegistry` owns the asyncio task lifecycle; `run_job` owns the
-stage progression. Each stage consumes + produces a `PlanState`
-passed through by reference, so intermediates (prefetched forecast
-field, routed candidate, score) don't round-trip through the DB.
+stage progression. The planner now enumerates a hourly departure grid
+across the request window, routes every candidate in parallel under a
+bounded executor, scores survivors, and emits the top-N as a
+multi-`<rte>` GPX blob.
 
-Chart data is still stubbed by `NullChartStore` — the real ENC / OSM /
-GEBCO ingest is the next M2 slice (plan/15-charts-bathymetry).
-
-`PlannerError` carries the job-level error code (plan/10 §errors) so
-`JobRegistry._wrap` writes the right row state on failure.
+Chart data is still stubbed by `NullChartStore` — real ENC / OSM /
+GEBCO ingest lands next (plan/15-charts-bathymetry).
 """
 
 from __future__ import annotations
@@ -18,22 +16,32 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from xml.sax.saxutils import escape
 
 from app.db import session_scope
 from app.logging import get_logger
 from app.models.voyage import Voyage
-from app.observability import tracer
+from app.observability import meter, tracer
 from app.schemas.request import VoyageRequest
 from app.services.charts import NullChartStore
 from app.services.forecast_field import ForecastField
 from app.services.jobs import set_stage, write_progress
 from app.services.polars import DEFAULT_POLAR_PATH, Polar
-from app.services.router import BoatLimits, RouterError, plan_candidate
+from app.services.router import (
+    BoatLimits,
+    IsochronePoint,
+    RouterError,
+    RouteResult,
+    plan_candidate,
+)
 from app.services.scorer import Score, score_candidate
 
 log = get_logger(__name__)
 _tracer = tracer("app.services.planner")
+_m = meter("app.services.planner")
+_candidates_total = _m.create_counter("bv.voyages.candidates_total", unit="1")
+_candidates_rejected = _m.create_counter("bv.voyages.candidates_rejected", unit="1")
 
 
 class PlannerError(Exception):
@@ -71,13 +79,20 @@ class ProgressThrottle:
 
 
 @dataclass
+class Candidate:
+    rank: int  # 1-based
+    depart_at: datetime
+    route: RouteResult
+    score: Score
+
+
+@dataclass
 class PlanState:
     voyage_id: str
     req: VoyageRequest
     forecast: ForecastField | None = None
-    route_points: list = field(default_factory=list)
-    reached_at: object | None = None
-    score: Score | None = None
+    candidates: list[Candidate] = field(default_factory=list)
+    skipped: dict[str, int] = field(default_factory=dict)
 
 
 def _bbox_from_request(req: VoyageRequest, pad_deg: float = 0.5) -> tuple[float, float, float, float]:
@@ -88,13 +103,26 @@ def _bbox_from_request(req: VoyageRequest, pad_deg: float = 0.5) -> tuple[float,
     return (lat_min, lon_min, lat_max, lon_max)
 
 
+def enumerate_departures(req: VoyageRequest, step_hours: int = 1) -> list[datetime]:
+    """Hourly departure grid across `[window.start_at, window.end_at]`.
+
+    Local-time filters and night-arrival filtering (plan/07 §Enumeration)
+    are stubbed for M2; full filtering lands with the BoatProfile table.
+    """
+    out: list[datetime] = []
+    t = req.window.start_at
+    while t <= req.window.end_at:
+        out.append(t)
+        t += timedelta(hours=step_hours)
+    return out
+
+
 # --- stages --------------------------------------------------------------
 
 
 async def _stage_charts_fetching(state: PlanState) -> None:
     await set_stage(state.voyage_id, "charts_fetching", pct=0.0, detail="null-chart-store")
     with _tracer.start_as_current_span("job.charts_fetching"):
-        # Real ENC / OSM / GEBCO ingest lands with plan/15-charts-bathymetry.
         await asyncio.sleep(0)
 
 
@@ -119,25 +147,19 @@ async def _stage_forecast_prefetching(state: PlanState) -> None:
     await write_progress(state.voyage_id, "forecast_prefetching", 1.0)
 
 
-async def _stage_routing(state: PlanState) -> None:
-    await set_stage(state.voyage_id, "routing", pct=0.0, detail="isochrone search")
-    if state.forecast is None:
-        raise PlannerError("INTERNAL_ERROR", "routing", "forecast not prefetched")
-    polar = Polar.load(DEFAULT_POLAR_PATH)
-    charts = NullChartStore()
-    origin = (state.req.origin.lat, state.req.origin.lon)
-    destination = (state.req.destination.lat, state.req.destination.lon)
-    depart_at = state.req.window.start_at
-
-    with _tracer.start_as_current_span(
-        "job.routing",
-        attributes={"voyage.id": state.voyage_id, "objective": state.req.objective},
-    ):
+async def _route_one(
+    depart_at: datetime,
+    state: PlanState,
+    polar: Polar,
+    charts: NullChartStore,
+    sem: asyncio.Semaphore,
+) -> tuple[datetime, RouteResult | None, str | None]:
+    async with sem:
         try:
             result = await asyncio.to_thread(
                 plan_candidate,
-                origin=origin,
-                destination=destination,
+                origin=(state.req.origin.lat, state.req.origin.lon),
+                destination=(state.req.destination.lat, state.req.destination.lon),
                 depart_at=depart_at,
                 polar=polar,
                 forecast=state.forecast,
@@ -147,26 +169,84 @@ async def _stage_routing(state: PlanState) -> None:
                 max_steps=168,
                 arrival_tolerance_nm=0.5,
             )
+            return depart_at, result, None
         except RouterError as exc:
-            raise PlannerError(exc.code, "routing", exc.detail) from exc
+            return depart_at, None, exc.code
 
-    state.route_points = result.points
-    state.reached_at = result.reached_at
-    await write_progress(
-        state.voyage_id,
-        "routing",
-        1.0,
-        detail=f"{result.steps_used} steps; {len(result.points)} waypoints",
-    )
+
+async def _stage_routing(state: PlanState) -> None:
+    await set_stage(state.voyage_id, "routing", pct=0.0, detail="enumerating departures")
+    if state.forecast is None:
+        raise PlannerError("INTERNAL_ERROR", "routing", "forecast not prefetched")
+
+    polar = Polar.load(DEFAULT_POLAR_PATH)
+    charts = NullChartStore()
+    departures = enumerate_departures(state.req)
+    _candidates_total.add(len(departures))
+
+    sem = asyncio.Semaphore(4)  # BV_MAX_CONCURRENT_ROUTES
+
+    with _tracer.start_as_current_span(
+        "job.routing",
+        attributes={
+            "voyage.id": state.voyage_id,
+            "objective": state.req.objective,
+            "departures": len(departures),
+        },
+    ):
+        async def _tick(total: int, done: list[int]) -> None:
+            done[0] += 1
+            await write_progress(
+                state.voyage_id,
+                "routing",
+                done[0] / total,
+                detail=f"{done[0]} / {total} candidates routed",
+            )
+
+        done = [0]
+        async def _one(t: datetime) -> tuple[datetime, RouteResult | None, str | None]:
+            r = await _route_one(t, state, polar, charts, sem)
+            await _tick(len(departures), done)
+            return r
+
+        results = await asyncio.gather(*[_one(t) for t in departures])
+
+    survivors: list[tuple[datetime, RouteResult, Score]] = []
+    skipped: dict[str, int] = {}
+    for depart_at, route, err in results:
+        if err is not None:
+            skipped[err.lower()] = skipped.get(err.lower(), 0) + 1
+            _candidates_rejected.add(1, {"reason": err})
+            continue
+        assert route is not None
+        s = score_candidate(route.points)
+        survivors.append((depart_at, route, s))
+
+    # Rank: -score desc, depart_at asc (stable).
+    survivors.sort(key=lambda x: (-x[2].total, x[0]))
+    top = survivors[: state.req.max_candidates]
+
+    state.candidates = [
+        Candidate(rank=i + 1, depart_at=d, route=r, score=s)
+        for i, (d, r, s) in enumerate(top)
+    ]
+    state.skipped = skipped
+
+    if not state.candidates:
+        raise PlannerError(
+            "ROUTE_BLOCKED",
+            "routing",
+            f"no candidates survived; skipped={skipped}",
+        )
 
 
 async def _stage_scoring(state: PlanState) -> None:
-    await set_stage(state.voyage_id, "scoring", pct=0.0)
+    """Scoring already happened inline during routing; this stage is kept
+    for trace-topology parity with plan/16 and for a future split (where
+    scoring a surfaced candidate runs contingencies + summary)."""
+    await set_stage(state.voyage_id, "scoring", pct=1.0, detail=f"{len(state.candidates)} ranked")
     with _tracer.start_as_current_span("job.scoring"):
-        state.score = score_candidate(state.route_points)
-    await write_progress(
-        state.voyage_id, "scoring", 1.0, detail=f"total={state.score.total}"
-    )
+        await asyncio.sleep(0)
 
 
 async def _stage_finalizing(state: PlanState) -> None:
@@ -178,6 +258,8 @@ async def _stage_finalizing(state: PlanState) -> None:
                 "forecast": "open-meteo-marine",
                 "tides": None,
                 "charts": {"source": "null-chart-store"},
+                "skipped": state.skipped,
+                "candidates_surfaced": len(state.candidates),
             }
         )
         async with session_scope() as session:
@@ -191,53 +273,64 @@ async def _stage_finalizing(state: PlanState) -> None:
 # --- GPX emission --------------------------------------------------------
 
 
-def _emit_gpx(state: PlanState) -> bytes:
-    """Emit a minimal GPX containing the routed candidate as a single rte.
+def _rtept(p: IsochronePoint, name: str = "") -> str:
+    extras = ""
+    if p.heading_deg is not None and p.bsp_kts > 0:
+        extras = (
+            f'<extensions><bv:leg bearingDeg="{p.heading_deg:.1f}" '
+            f'bspKts="{p.bsp_kts:.2f}"/></extensions>'
+        )
+    name_el = f"<name>{escape(name)}</name>" if name else ""
+    return (
+        f'<rtept lat="{p.lat:.6f}" lon="{p.lon:.6f}">'
+        f"{name_el}<time>{p.t.isoformat()}</time>{extras}"
+        f"</rtept>"
+    )
 
-    `services/gpx.py` replaces this with a full round-trip-safe
-    serializer at M5; for now it's enough to produce a file that
-    loads cleanly in OpenCPN and carries the `bv:` score extension.
+
+def _emit_gpx(state: PlanState) -> bytes:
+    """Emit a GPX 1.1 doc with one <rte> per surfaced candidate.
+
+    `services/gpx.py` replaces this with a fully round-trip-safe
+    serializer at M5 (plan/09); for now it's enough to produce a file
+    that loads cleanly in OpenCPN and carries the `bv:` score + rank.
     """
     req = state.req
-    origin = escape(req.origin.name or "Origin")
-    dest = escape(req.destination.name or "Destination")
-    score_total = state.score.total if state.score else 0.0
+    origin_label = escape(req.origin.name or "Origin")
+    dest_label = escape(req.destination.name or "Destination")
 
-    rtepts: list[str] = []
-    for p in state.route_points:
-        name = (
-            "Origin" if p.parent is None
-            else "Destination" if p.lat == req.destination.lat and p.lon == req.destination.lon
-            else ""
-        )
-        time_str = p.t.isoformat()
-        extras = ""
-        if p.heading_deg is not None and p.bsp_kts > 0:
-            extras = (
-                f'<extensions><bv:leg bearingDeg="{p.heading_deg:.1f}" '
-                f'bspKts="{p.bsp_kts:.2f}"/></extensions>'
-            )
-        rtepts.append(
-            f'<rtept lat="{p.lat:.6f}" lon="{p.lon:.6f}">'
-            f'{("<name>" + escape(name) + "</name>") if name else ""}'
-            f'<time>{time_str}</time>{extras}'
-            f"</rtept>"
+    rtes: list[str] = []
+    for c in state.candidates:
+        pts = c.route.points
+        body: list[str] = []
+        for idx, p in enumerate(pts):
+            if idx == 0:
+                body.append(_rtept(p, "Origin"))
+            elif idx == len(pts) - 1:
+                body.append(_rtept(p, "Destination"))
+            else:
+                body.append(_rtept(p))
+        body_str = "\n      ".join(body)
+        rtes.append(
+            "  <rte>\n"
+            f"    <name>Candidate {c.rank}: {origin_label} -> {dest_label}</name>\n"
+            f"    <type>primary</type>\n"
+            "    <extensions>"
+            f'<bv:candidate rank="{c.rank}" '
+            f'departAt="{c.depart_at.isoformat()}" '
+            f'arriveAt="{c.route.reached_at.isoformat()}"/>'
+            f'<bv:score total="{c.score.total:.2f}"/>'
+            "</extensions>\n"
+            f"    {body_str}\n"
+            "  </rte>"
         )
 
-    route_name = f"{origin} -> {dest}"
-    rte = (
-        "  <rte>\n"
-        f"    <name>{route_name}</name>\n"
-        f"    <extensions><bv:score total=\"{score_total:.2f}\"/></extensions>\n"
-        f"    {chr(10).join(rtepts)}\n"
-        "  </rte>\n"
-    )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<gpx version="1.1" creator="better-voyage/0.1"\n'
         '     xmlns="http://www.topografix.com/GPX/1/1"\n'
         '     xmlns:bv="https://better-voyage.app/gpx/1">\n'
-        f"{rte}"
+        f"{chr(10).join(rtes)}\n"
         "</gpx>\n"
     ).encode()
 
@@ -262,9 +355,11 @@ async def run_job(voyage_id: str) -> None:
 
 
 __all__ = [
+    "Candidate",
     "PlanState",
     "PlannerError",
     "ProgressThrottle",
+    "enumerate_departures",
     "run_job",
     "write_progress",
 ]
