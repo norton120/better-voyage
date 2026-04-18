@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>better-voyage</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+        crossorigin="" />
+  <link rel="stylesheet" href="/static/ui.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+          crossorigin=""></script>
+  <script src="https://unpkg.com/htmx.org@1.9.12"
+          integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2"
+          crossorigin="anonymous"></script>
+</head>
+<body>
+  <header>
+    <h1>better-voyage</h1>
+    <p class="sub">context-aware GPX route planner — click map for origin &amp; destination</p>
+  </header>
+
+  <main>
+    <section id="map-pane">
+      <div id="map"></div>
+      <div id="map-hint">
+        <span id="pick-hint">click map to set <b>origin</b></span>
+        <button type="button" id="reset-picks" hidden>reset picks</button>
+      </div>
+    </section>
+
+    <section id="form-pane">
+      <form id="voyage-form"
+            hx-post="/ui/voyages"
+            hx-target="#status-area"
+            hx-swap="innerHTML"
+            hx-indicator="#submit-spinner">
+        <fieldset>
+          <legend>endpoints</legend>
+          <label>
+            origin lat
+            <input type="number" step="any" name="origin_lat" id="origin-lat" required readonly />
+          </label>
+          <label>
+            origin lon
+            <input type="number" step="any" name="origin_lon" id="origin-lon" required readonly />
+          </label>
+          <label>
+            origin name (optional)
+            <input type="text" name="origin_name" id="origin-name" placeholder="Annapolis" />
+          </label>
+          <label>
+            destination lat
+            <input type="number" step="any" name="destination_lat" id="destination-lat" required readonly />
+          </label>
+          <label>
+            destination lon
+            <input type="number" step="any" name="destination_lon" id="destination-lon" required readonly />
+          </label>
+          <label>
+            destination name (optional)
+            <input type="text" name="destination_name" id="destination-name" placeholder="Norfolk" />
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>window</legend>
+          <label>
+            start
+            <input type="datetime-local" name="start_at" required />
+          </label>
+          <label>
+            end
+            <input type="datetime-local" name="end_at" required />
+          </label>
+          <label>
+            tz
+            <input type="text" name="tz" value="America/New_York" />
+          </label>
+          <label>
+            earliest local time (optional)
+            <input type="time" name="earliest_local" />
+          </label>
+          <label>
+            latest local time (optional)
+            <input type="time" name="latest_local" />
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>boat &amp; objective</legend>
+          <label>
+            boat profile
+            <select name="boat_profile_name">
+              {% for p in profiles %}
+              <option value="{{ p.name }}" {% if p.name == default_profile %}selected{% endif %}>
+                {{ p.name }}
+              </option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            objective
+            <select name="objective">
+              <option value="fastest" selected>fastest</option>
+              <option value="comfortable">comfortable</option>
+              <option value="short_tacks">short_tacks</option>
+            </select>
+          </label>
+          <label>
+            max candidates
+            <input type="number" name="max_candidates" value="3" min="1" max="20" />
+          </label>
+        </fieldset>
+
+        <button type="submit" id="submit-btn">plan voyage</button>
+        <span id="submit-spinner" class="htmx-indicator">⏳</span>
+      </form>
+
+      <section id="status-area" aria-live="polite"></section>
+    </section>
+  </main>
+
+  <script src="/static/ui.js"></script>
+</body>
+</html>

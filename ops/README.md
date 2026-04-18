@@ -11,7 +11,11 @@ you're hunting a bug, reach for this first.
 | Docker               | `docker compose up --build`                                            | `app` only, OTel exporter = `console`               |
 | With observability   | `BV_OTEL_EXPORTER=otlp docker compose --profile observability up`      | Bundled Grafana + Tempo + Loki + Prometheus         |
 
-OpenAPI is at `/docs`; liveness probe at `/health`.
+Surfaces:
+
+- `/` — HTMX + Leaflet UI (click map to pick endpoints, fill form, submit).
+- `/docs` — OpenAPI / Swagger, hits the JSON API directly.
+- `/health` — liveness probe.
 
 ### Chart ingest prerequisites
 

@@ -1,7 +1,9 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app import __version__
 from app.db import engine, init_db
@@ -12,6 +14,7 @@ from app.services.boat_profiles import ensure_default_seeded
 from app.services.cache_pruner import run_forever as run_cache_pruner
 from app.services.jobs import JobRegistry
 from app.services.planner import run_job
+from app.ui import router as ui_router
 
 log = get_logger(__name__)
 
@@ -53,3 +56,7 @@ app.include_router(health.router)
 app.include_router(voyages.router)
 app.include_router(boat_profiles.router)
 app.include_router(pois.router)
+app.include_router(ui_router)
+
+_UI_STATIC = Path(__file__).parent / "ui" / "static"
+app.mount("/static", StaticFiles(directory=str(_UI_STATIC)), name="static")

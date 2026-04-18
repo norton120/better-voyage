@@ -1,0 +1,16 @@
+<div class="status running"
+     hx-get="/ui/voyages/{{ voyage.id }}/status"
+     hx-trigger="every 2s"
+     hx-swap="outerHTML">
+  <div class="status-header">
+    <span class="badge badge-{{ voyage.status }}">{{ voyage.status }}</span>
+    <code class="voyage-id">{{ voyage.id }}</code>
+  </div>
+  <div class="progress">
+    <div class="progress-bar" style="width: {{ (voyage.pct * 100) | round(0) }}%;"></div>
+  </div>
+  <div class="stage-line">
+    <strong>{{ voyage.stage }}</strong>
+    {% if voyage.detail %}<span class="stage-detail">— {{ voyage.detail }}</span>{% endif %}
+  </div>
+</div>

@@ -1,0 +1,10 @@
+<div class="status failed">
+  <div class="status-header">
+    <span class="badge badge-failed">failed</span>
+    {% if voyage_id %}<code class="voyage-id">{{ voyage_id }}</code>{% endif %}
+  </div>
+  <div class="error-body">
+    <p><strong>{{ error_code }}</strong></p>
+    {% if detail %}<pre class="error-detail">{{ detail }}</pre>{% endif %}
+  </div>
+</div>

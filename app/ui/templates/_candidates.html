@@ -1,0 +1,59 @@
+<div class="status done" data-voyage-id="{{ voyage.id }}">
+  <div class="status-header">
+    <span class="badge badge-done">done</span>
+    <code class="voyage-id">{{ voyage.id }}</code>
+  </div>
+
+  {% if voyage.coverage %}
+  <div class="coverage">
+    {% set c = voyage.coverage.charts %}
+    <span>charts:</span>
+    {% if c and c.enc_cells is defined %}
+      ENC {{ c.enc_cells }} · OSM {{ c.osm_extracts }} ·
+      GEBCO {{ c.gebco_tile or '—' }}
+    {% else %}
+      {{ c.source if c else 'unknown' }}
+    {% endif %}
+    {% if voyage.coverage.forecast_stale_at %}
+      · <strong>forecast stale</strong> since {{ voyage.coverage.forecast_stale_at }}
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <h2>candidates</h2>
+  {% if not voyage.candidates %}
+    <p>no candidates surfaced.</p>
+  {% endif %}
+  <ol class="candidates">
+    {% for c in voyage.candidates %}
+    <li class="candidate" data-rank="{{ c.rank }}">
+      <div class="candidate-row">
+        <span class="rank">#{{ c.rank }}</span>
+        <span class="score">score {{ '%.1f' | format(c.score or 0) }}</span>
+        <span class="times">
+          <span>depart {{ c.depart_at or '—' }}</span>
+          <span>arrive {{ c.arrive_at or '—' }}</span>
+        </span>
+      </div>
+      {% if c.summary %}
+        <p class="summary">
+          <span class="summary-source">[{{ c.summary_source or 'summary' }}]</span>
+          {{ c.summary }}
+        </p>
+      {% endif %}
+      <div class="candidate-actions">
+        <button type="button" class="show-on-map"
+                data-voyage-id="{{ voyage.id }}"
+                data-rank="{{ c.rank }}">show on map</button>
+        <a class="download"
+           href="/voyages/{{ voyage.id }}/gpx?candidate={{ c.rank }}"
+           download>download GPX</a>
+      </div>
+    </li>
+    {% endfor %}
+  </ol>
+
+  <p class="all-gpx">
+    <a href="/voyages/{{ voyage.id }}/gpx" download>download the master GPX (all candidates + contingencies)</a>
+  </p>
+</div>

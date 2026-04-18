@@ -24,12 +24,22 @@ See [`plan/`](./plan/README.md) for the detailed design.
 
 ```bash
 docker compose up --build
-# FastAPI on http://localhost:8000 — OpenAPI at /docs
+# FastAPI on http://localhost:8000
+#   UI:     http://localhost:8000/
+#   OpenAPI: http://localhost:8000/docs
 curl http://localhost:8000/health
 ```
 
 The API is live at this point, but `POST /voyages` needs chart data —
 see [Chart ingest setup](#chart-ingest-setup) below.
+
+## UI
+
+A minimal HTMX + Leaflet page at `/` — click the map to pick origin
+then destination, fill the window / boat / objective form, submit,
+watch progress, and download any candidate's GPX. The UI is a thin
+face over the JSON API; use Swagger (`/docs`) for anything the form
+doesn't expose.
 
 ## Local development (uv)
 
@@ -76,6 +86,7 @@ app/        FastAPI application
   routers/  HTTP endpoints
   schemas/  Pydantic request/response schemas
   services/ Domain logic (routing, charts, scoring, GPX, NL summary)
+  ui/       HTMX + Leaflet skipper UI (templates + static)
 ops/        Operator tooling
   grafana/  Dashboard JSON for the otel-lgtm Grafana stack
 tests/      Pytest suite

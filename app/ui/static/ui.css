@@ -1,0 +1,337 @@
+:root {
+  --bg: #0f1419;
+  --panel: #1b2330;
+  --panel-2: #232d3d;
+  --ink: #e5e9ef;
+  --ink-dim: #9aa5b7;
+  --accent: #67b7ff;
+  --accent-warm: #ffb347;
+  --ok: #6fd29b;
+  --err: #ff6b6b;
+  --border: #2e3a4d;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+}
+
+header {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+header h1 {
+  margin: 0;
+  font-size: 1.25rem;
+  letter-spacing: 0.03em;
+}
+
+header .sub {
+  margin: 0.2rem 0 0;
+  color: var(--ink-dim);
+  font-size: 0.85rem;
+}
+
+main {
+  display: grid;
+  grid-template-columns: 1fr 420px;
+  gap: 1rem;
+  padding: 1rem;
+  height: calc(100vh - 3.25rem);
+  overflow: hidden;
+}
+
+#map-pane {
+  position: relative;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+#map {
+  width: 100%;
+  height: 100%;
+}
+
+#map-hint {
+  position: absolute;
+  top: 0.5rem;
+  left: 0.5rem;
+  z-index: 400;
+  background: rgba(15, 20, 25, 0.85);
+  border: 1px solid var(--border);
+  padding: 0.35rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+#reset-picks {
+  background: var(--panel-2);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+#form-pane {
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
+form fieldset {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem 1rem 1rem;
+  margin: 0 0 0.9rem;
+  background: var(--panel);
+}
+
+form legend {
+  padding: 0 0.4rem;
+  color: var(--ink-dim);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+form label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-size: 0.82rem;
+  color: var(--ink-dim);
+}
+
+form input,
+form select {
+  display: block;
+  width: 100%;
+  margin-top: 0.15rem;
+  padding: 0.35rem 0.5rem;
+  background: var(--panel-2);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+form input:read-only {
+  color: var(--accent);
+}
+
+#submit-btn {
+  width: 100%;
+  padding: 0.55rem;
+  background: var(--accent);
+  color: #05131f;
+  border: 0;
+  border-radius: 4px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#submit-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.htmx-indicator {
+  opacity: 0;
+  transition: opacity 120ms;
+  margin-left: 0.5rem;
+}
+
+.htmx-request .htmx-indicator { opacity: 1; }
+
+#status-area {
+  margin-top: 1rem;
+}
+
+.status {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem 0.9rem;
+  margin-bottom: 0.75rem;
+}
+
+.status-header {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border-radius: 3px;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: var(--panel-2);
+  color: var(--ink-dim);
+}
+
+.badge-done { background: var(--ok); color: #05131f; }
+.badge-failed { background: var(--err); color: #fff; }
+.badge-cancelled { background: var(--ink-dim); color: #05131f; }
+
+.voyage-id {
+  color: var(--ink-dim);
+  font-size: 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+
+.progress {
+  width: 100%;
+  height: 6px;
+  background: var(--panel-2);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 0.5rem;
+}
+
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-warm));
+  transition: width 300ms ease;
+}
+
+.stage-line {
+  font-size: 0.85rem;
+}
+
+.stage-detail {
+  color: var(--ink-dim);
+  margin-left: 0.25rem;
+}
+
+.coverage {
+  font-size: 0.75rem;
+  color: var(--ink-dim);
+  margin-bottom: 0.6rem;
+}
+
+h2 {
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-dim);
+  margin: 0.4rem 0 0.4rem;
+}
+
+.candidates {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.candidate {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.6rem 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.candidate.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.candidate-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.rank {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.score {
+  font-size: 0.8rem;
+  color: var(--ink-dim);
+}
+
+.times {
+  font-size: 0.75rem;
+  color: var(--ink-dim);
+  display: flex;
+  gap: 0.6rem;
+  flex: 1;
+  justify-content: flex-end;
+}
+
+.summary {
+  font-size: 0.85rem;
+  margin: 0.3rem 0;
+  color: var(--ink);
+}
+
+.summary-source {
+  color: var(--ink-dim);
+  font-size: 0.7rem;
+  margin-right: 0.3rem;
+}
+
+.candidate-actions {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+}
+
+.candidate-actions button,
+.candidate-actions a {
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0.25rem 0.55rem;
+  text-decoration: none;
+  cursor: pointer;
+  font-size: 0.82rem;
+}
+
+.candidate-actions .show-on-map:hover,
+.candidate-actions .download:hover {
+  border-color: var(--accent);
+}
+
+.all-gpx {
+  margin: 0.75rem 0 0;
+  font-size: 0.8rem;
+}
+
+.all-gpx a {
+  color: var(--accent);
+}
+
+.error-body pre {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5rem;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  max-height: 20vh;
+  overflow: auto;
+}

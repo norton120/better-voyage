@@ -301,7 +301,8 @@ end.*
 
 - Pareto / multi-objective routing (currently single-objective per run)
 - GRIB ingestion for offshore routes beyond Open-Meteo coverage
-- Small web UI (HTMX / Leaflet) for picking origin/destination
+- ~~Small web UI (HTMX / Leaflet) for picking origin/destination~~ —
+  landed early; see `app/ui/` and `GET /`.
 - User accounts + history
 - LLM-polished summaries behind a flag
 - "Departure diary" — record actuals, compare to predicted candidate,
