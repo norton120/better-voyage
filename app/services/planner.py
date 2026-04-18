@@ -26,6 +26,13 @@ from app.observability import meter, tracer
 from app.schemas.request import VoyageRequest
 from app.services import boat_profiles
 from app.services.charts import NullChartStore
+from app.services.contingency import (
+    BackupDestination,
+    TapOut,
+    decision_points,
+    find_backup_destinations,
+    find_tapouts,
+)
 from app.services.forecast_field import ForecastField
 from app.services.jobs import set_stage, write_progress
 from app.services.polars import Polar
@@ -85,6 +92,9 @@ class Candidate:
     depart_at: datetime
     route: RouteResult
     score: Score
+    backup_destinations: list[BackupDestination] = field(default_factory=list)
+    # Map from rtept index within route.points to its tap-out list.
+    tapouts_by_index: dict[int, list[TapOut]] = field(default_factory=dict)
 
 
 @dataclass
@@ -270,8 +280,9 @@ async def _stage_scoring(state: PlanState) -> None:
 
 
 async def _stage_finalizing(state: PlanState) -> None:
-    await set_stage(state.voyage_id, "finalizing", pct=0.0, detail="emitting gpx")
+    await set_stage(state.voyage_id, "finalizing", pct=0.0, detail="contingencies + gpx")
     with _tracer.start_as_current_span("job.finalizing"):
+        _derive_contingencies(state)
         gpx = _emit_gpx(state)
         coverage = json.dumps(
             {
@@ -290,16 +301,39 @@ async def _stage_finalizing(state: PlanState) -> None:
             row.coverage_json = coverage
 
 
+def _derive_contingencies(state: PlanState) -> None:
+    dest_lat = state.req.destination.lat
+    dest_lon = state.req.destination.lon
+    for c in state.candidates:
+        c.backup_destinations = find_backup_destinations(dest_lat, dest_lon)
+        picks = decision_points(c.route.points)
+        by_index: dict[int, list[TapOut]] = {}
+        for p in picks:
+            idx = c.route.points.index(p)
+            by_index[idx] = find_tapouts(p)
+        c.tapouts_by_index = by_index
+
+
 # --- GPX emission --------------------------------------------------------
 
 
-def _rtept(p: IsochronePoint, name: str = "") -> str:
-    extras = ""
+def _rtept(p: IsochronePoint, name: str = "", tapouts: list[TapOut] | None = None) -> str:
+    ext_bits: list[str] = []
     if p.heading_deg is not None and p.bsp_kts > 0:
-        extras = (
-            f'<extensions><bv:leg bearingDeg="{p.heading_deg:.1f}" '
-            f'bspKts="{p.bsp_kts:.2f}"/></extensions>'
+        ext_bits.append(
+            f'<bv:leg bearingDeg="{p.heading_deg:.1f}" bspKts="{p.bsp_kts:.2f}"/>'
         )
+    if tapouts:
+        ext_bits.append("<bv:tapOut>")
+        for t in tapouts:
+            ext_bits.append(
+                f'<bv:option name="{escape(t.name)}" '
+                f'lat="{t.lat:.6f}" lon="{t.lon:.6f}" '
+                f'detourNm="{t.detour_nm:.2f}" '
+                f'type="{escape(t.type or "")}"/>'
+            )
+        ext_bits.append("</bv:tapOut>")
+    extras = f"<extensions>{''.join(ext_bits)}</extensions>" if ext_bits else ""
     name_el = f"<name>{escape(name)}</name>" if name else ""
     return (
         f'<rtept lat="{p.lat:.6f}" lon="{p.lon:.6f}">'
@@ -324,13 +358,25 @@ def _emit_gpx(state: PlanState) -> bytes:
         pts = c.route.points
         body: list[str] = []
         for idx, p in enumerate(pts):
+            tapouts = c.tapouts_by_index.get(idx)
             if idx == 0:
                 body.append(_rtept(p, "Origin"))
             elif idx == len(pts) - 1:
                 body.append(_rtept(p, "Destination"))
             else:
-                body.append(_rtept(p))
+                body.append(_rtept(p, tapouts=tapouts))
         body_str = "\n      ".join(body)
+
+        backup_xml = ""
+        if c.backup_destinations:
+            options = "".join(
+                f'<bv:option name="{escape(b.name)}" '
+                f'lat="{b.lat:.6f}" lon="{b.lon:.6f}" '
+                f'detourNm="{b.detour_nm:.2f}"/>'
+                for b in c.backup_destinations
+            )
+            backup_xml = f"<bv:backupDestinations>{options}</bv:backupDestinations>"
+
         rtes.append(
             "  <rte>\n"
             f"    <name>Candidate {c.rank}: {origin_label} -> {dest_label}</name>\n"
@@ -340,6 +386,7 @@ def _emit_gpx(state: PlanState) -> bytes:
             f'departAt="{c.depart_at.isoformat()}" '
             f'arriveAt="{c.route.reached_at.isoformat()}"/>'
             f'<bv:score total="{c.score.total:.2f}"/>'
+            f"{backup_xml}"
             "</extensions>\n"
             f"    {body_str}\n"
             "  </rte>"
