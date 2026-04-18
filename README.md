@@ -47,6 +47,24 @@ app/        FastAPI application
   routers/  HTTP endpoints
   schemas/  Pydantic request/response schemas
   services/ Domain logic (scoring, planning, GPX)
+ops/        Operator tooling
+  grafana/  Dashboard JSON for the otel-lgtm Grafana stack
 tests/      Pytest suite
 plan/       Design & requirements docs
 ```
+
+## Observability
+
+An optional local Grafana + Tempo + Loki + Prometheus stack ships via
+the `observability` compose profile:
+
+```bash
+BV_OTEL_EXPORTER=otlp docker compose --profile observability up
+# Grafana: http://localhost:3000   (admin / admin)
+```
+
+Import [`ops/grafana/better-voyage.json`](./ops/grafana/better-voyage.json)
+as a dashboard (Grafana → Dashboards → New → Import). The dashboard
+targets the Prometheus datasource that the `grafana/otel-lgtm` image
+provisions and panels cover jobs, upstream / cache, router, and
+contingencies.

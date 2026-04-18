@@ -253,7 +253,11 @@ end.*
       `coverage_json.forecast_stale_at` and `<bv:coverage
       forecastStaleAt="..."/>` in the emitted GPX)
 
-- [ ] Grafana dashboard JSON checked in (provisioned on the lgtm stack)
+- [x] Grafana dashboard JSON checked in
+      (`ops/grafana/better-voyage.json` — panels for jobs, cache,
+      router, contingencies; targets the Prometheus datasource the
+      `otel-lgtm` image provisions. Import via Grafana UI; automated
+      provisioning lands with ops docs)
 
 - [ ] Ops docs
 
