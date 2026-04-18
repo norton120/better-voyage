@@ -64,11 +64,11 @@ chart sources can't cover the bbox.*
 
 **Chart ingest** (see doc 03, Part 2)
 
-- [ ] Heavy-lift deps: `numpy`, `scipy`, `pyproj`, `shapely`,
-  
-      `pyogrio`, `pyosmium`, `netCDF4`, `xarray`, `geopandas`
+- [x] Heavy-lift deps: `numpy`, `scipy`, `pyproj`, `shapely`,
+      `pyogrio`, `osmium` (the former `pyosmium` 4.x), `netCDF4`,
+      `xarray`, `geopandas`
 
-- [ ] `Dockerfile` installs `gdal-bin libgdal-dev libspatialite-dev`
+- [x] `Dockerfile` installs `gdal-bin libgdal-dev libspatialite-dev`
 
 - [ ] `services/charts.py` — `ChartStore` with `ensure_coverage`,
   
@@ -78,7 +78,13 @@ chart sources can't cover the bbox.*
 
 - [ ] OpenSeaMap reader (`pyosmium`) → preprocessed GeoJSON
 
-- [ ] GEBCO reader (`xarray`) → in-memory bathymetry
+- [x] GEBCO reader (`xarray`) → in-memory bathymetry
+      (`app/services/gebco.py` — `load_gebco_bbox(path, bbox)` slices a
+      netCDF into memory; `GebcoBathymetry.depth(lat, lon)` bilinear
+      interpolates, returns `None` over land or outside the slice. Spans
+      `charts.load`, counter `bv.charts.cells_loaded{source="gebco"}`.
+      Tests in `tests/unit/test_gebco.py`. ChartStore integration lands
+      with the remaining chart ingest work.)
 
 - [ ] `python -m app.charts fetch --bbox|--region` CLI
 
@@ -191,8 +197,11 @@ renders cleanly in OpenCPN with primary + contingencies + navaids.*
 - [x] Deterministic element ordering (doc 09) — candidate primaries
       emit in ascending `bv:candidate/@rank`, escape-hatch `<rte>`s
       follow their parent; test asserts the invariant
-- [ ] Validation test against GPX 1.1 XSD (structural + well-formedness
-      check landed; full XSD validation comes with the M5 gpxpy rewrite)
+- [x] Validation test against GPX 1.1 XSD
+      (`test_gpx_validates_against_gpx_1_1_xsd` — lxml + bundled
+      `tests/fixtures/gpx/gpx-1.1.xsd`; validates both the master and
+      per-candidate files. `bv:` extensions ride through the XSD's
+      `xsd:any namespace="##other" processContents="lax"`.)
 - [ ] Manual verification in OpenCPN
 
 ## M6 — NL summary (LLM) ✅

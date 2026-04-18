@@ -135,8 +135,9 @@ async def test_gpx_is_well_formed_and_structurally_valid(
     client: AsyncClient, httpx_mock
 ) -> None:
     """The emitted GPX must parse, declare GPX 1.1 + the bv: namespace,
-    and every <rtept> must carry lat/lon/time. Full XSD validation
-    lands with the M5 gpxpy rewrite; this is the interim guardrail."""
+    and every <rtept> must carry lat/lon/time. XSD validation is in
+    `test_gpx_validates_against_gpx_1_1_xsd`; this covers the
+    bv:-namespace + rank-ordering invariants the XSD can't express."""
     import xml.etree.ElementTree as ET
 
     n = 24
@@ -222,6 +223,89 @@ async def test_gpx_is_well_formed_and_structurally_valid(
             assert pt.get("lat") is not None
             assert pt.get("lon") is not None
             assert pt.find(f"{{{ns_gpx}}}time") is not None
+
+
+@pytest.mark.asyncio
+async def test_gpx_validates_against_gpx_1_1_xsd(
+    client: AsyncClient, httpx_mock
+) -> None:
+    """Emitted GPX must validate against the GPX 1.1 XSD.
+
+    The XSD declares `extensions` as `xsd:any namespace="##other"
+    processContents="lax"`, so our `bv:` children ride along fine — the
+    guardrail here is that the GPX 1.1 core shape (metadata, rte,
+    rtept, etc.) is conformant."""
+    from lxml import etree
+
+    from tests.fixtures import FIXTURES_DIR
+
+    n = 24
+    hours = [f"2026-04-18T{h:02d}:00" for h in range(n)]
+    httpx_mock.add_response(
+        url=re.compile(r"https://marine-api\.open-meteo\.com/.*"),
+        json={
+            "hourly": {
+                "time": hours,
+                "wave_height": [0.4] * n,
+                "wave_direction": [180.0] * n,
+                "wave_period": [3.5] * n,
+                "wind_wave_height": [0.3] * n,
+                "wind_wave_direction": [180.0] * n,
+                "wind_wave_period": [2.8] * n,
+                "swell_wave_height": [0.2] * n,
+                "swell_wave_direction": [180.0] * n,
+                "swell_wave_period": [4.0] * n,
+                "ocean_current_velocity": [0.0] * n,
+                "ocean_current_direction": [0.0] * n,
+            }
+        },
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        url=re.compile(r"https://api\.open-meteo\.com/v1/forecast.*"),
+        json={
+            "hourly": {
+                "time": hours,
+                "wind_speed_10m": [22.2] * n,
+                "wind_direction_10m": [180.0] * n,
+                "wind_gusts_10m": [30.0] * n,
+            }
+        },
+        is_reusable=True,
+    )
+
+    post = await client.post(
+        "/voyages",
+        json={
+            "origin": {"lat": 38.5, "lon": -76.5, "name": "Origin"},
+            "destination": {"lat": 38.5, "lon": -76.07, "name": "Destination"},
+            "window": {
+                "start_at": "2026-04-18T00:00:00Z",
+                "end_at": "2026-04-18T01:00:00Z",
+                "tz": "UTC",
+            },
+            "boat_profile_name": "default",
+            "max_candidates": 2,
+        },
+    )
+    vid = post.json()["id"]
+    for _ in range(500):
+        s = await client.get(f"/voyages/{vid}")
+        if s.json()["status"] in {"done", "failed", "cancelled"}:
+            break
+        await asyncio.sleep(0.02)
+
+    schema = etree.XMLSchema(
+        etree.parse(str(FIXTURES_DIR / "gpx" / "gpx-1.1.xsd"))
+    )
+
+    # Master file.
+    master = (await client.get(f"/voyages/{vid}/gpx")).content
+    schema.assertValid(etree.fromstring(master))
+
+    # Per-candidate file should also validate.
+    single = (await client.get(f"/voyages/{vid}/gpx?candidate=1")).content
+    schema.assertValid(etree.fromstring(single))
 
 
 @pytest.mark.asyncio

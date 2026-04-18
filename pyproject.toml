@@ -33,6 +33,15 @@ dependencies = [
     "numpy>=2.4.4",
     "pyproj>=3.7.2",
     "anthropic>=0.45",
+    # Charts (plan/03 Part 2 + plan/15-charts-bathymetry) — M2
+    "scipy>=1.14",
+    "shapely>=2.0",
+    "pyogrio>=0.9",
+    # osmium 4.x is the PyPI name for the former pyosmium package.
+    "osmium>=4.0",
+    "netCDF4>=1.7",
+    "xarray>=2024.10",
+    "geopandas>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -44,6 +53,7 @@ dev = [
     "ruff>=0.7",
     "mypy>=1.13",
     "types-python-dateutil>=2.9",
+    "lxml>=5.3",
 ]
 
 [build-system]
@@ -63,6 +73,7 @@ dev-dependencies = [
     "mypy>=1.13",
     "types-python-dateutil>=2.9",
     "asgi-lifespan>=2.1.0",
+    "lxml>=5.3",
 ]
 
 [tool.pytest.ini_options]
@@ -70,7 +81,13 @@ minversion = "8.0"
 addopts = "-ra --strict-markers --strict-config"
 testpaths = ["tests"]
 asyncio_mode = "auto"
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # netCDF4 1.7.x wheels are built against an older numpy ABI and emit
+    # a benign size-changed RuntimeWarning at import time. Harmless —
+    # the symbol they use is the same size in numpy 2.x.
+    "ignore:numpy.ndarray size changed.*:RuntimeWarning",
+]
 
 [tool.coverage.run]
 source = ["app"]
