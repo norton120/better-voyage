@@ -10,20 +10,68 @@ runner for a blocking one.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 import pytest
 from httpx import AsyncClient
 
 
+def _open_meteo_marine_body(n_hours: int = 24) -> dict[str, Any]:
+    hours = [f"2026-04-18T{h:02d}:00" for h in range(n_hours)]
+    return {
+        "hourly": {
+            "time": hours,
+            "wave_height": [0.4] * n_hours,
+            "wave_direction": [180.0] * n_hours,
+            "wave_period": [3.5] * n_hours,
+            "wind_wave_height": [0.3] * n_hours,
+            "wind_wave_direction": [180.0] * n_hours,
+            "wind_wave_period": [2.8] * n_hours,
+            "swell_wave_height": [0.2] * n_hours,
+            "swell_wave_direction": [180.0] * n_hours,
+            "swell_wave_period": [4.0] * n_hours,
+            "ocean_current_velocity": [0.0] * n_hours,
+            "ocean_current_direction": [0.0] * n_hours,
+        }
+    }
+
+
+def _open_meteo_forecast_body(n_hours: int = 24) -> dict[str, Any]:
+    hours = [f"2026-04-18T{h:02d}:00" for h in range(n_hours)]
+    return {
+        "hourly": {
+            "time": hours,
+            "wind_speed_10m": [22.2] * n_hours,  # km/h → 12 kt
+            "wind_direction_10m": [180.0] * n_hours,
+            "wind_gusts_10m": [30.0] * n_hours,
+        }
+    }
+
+
+def _register_open_meteo_mocks(httpx_mock: Any) -> None:
+    httpx_mock.add_response(
+        url=re.compile(r"https://marine-api\.open-meteo\.com/.*"),
+        json=_open_meteo_marine_body(),
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        url=re.compile(r"https://api\.open-meteo\.com/v1/forecast.*"),
+        json=_open_meteo_forecast_body(),
+        is_reusable=True,
+    )
+
+
 def _payload(**overrides: Any) -> dict[str, Any]:
+    # Short east-bound hop so the router terminates inside the test's
+    # 24-hour mocked forecast window.
     base: dict[str, Any] = {
-        "origin": {"lat": 38.9784, "lon": -76.4922, "name": "Annapolis"},
-        "destination": {"lat": 36.8467, "lon": -76.2929, "name": "Norfolk"},
+        "origin": {"lat": 38.5, "lon": -76.5, "name": "Origin"},
+        "destination": {"lat": 38.5, "lon": -76.07, "name": "Destination"},
         "window": {
-            "start_at": "2026-04-20T00:00:00Z",
-            "end_at": "2026-04-27T00:00:00Z",
-            "tz": "America/New_York",
+            "start_at": "2026-04-18T00:00:00Z",
+            "end_at": "2026-04-18T23:00:00Z",
+            "tz": "UTC",
         },
         "boat_profile_name": "saltbreaker",
     }
@@ -43,7 +91,9 @@ async def _poll_until_done(client: AsyncClient, vid: str, timeout_s: float = 3.0
 
 
 @pytest.mark.asyncio
-async def test_post_voyage_runs_to_done(client: AsyncClient) -> None:
+async def test_post_voyage_runs_to_done(client: AsyncClient, httpx_mock) -> None:
+    _register_open_meteo_mocks(httpx_mock)
+
     resp = await client.post("/voyages", json=_payload())
     assert resp.status_code == 202
     body = resp.json()
@@ -51,7 +101,7 @@ async def test_post_voyage_runs_to_done(client: AsyncClient) -> None:
     assert body["status"] == "queued"
     assert body["links"]["self"] == f"/voyages/{body['id']}"
 
-    final = await _poll_until_done(client, body["id"])
+    final = await _poll_until_done(client, body["id"], timeout_s=15.0)
     assert final["status"] == "done"
     assert final["error"] is None
     assert final["voyage"]["gpx_available"] is True
@@ -178,10 +228,12 @@ async def test_cancel_returns_cancelled(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_terminal_voyage_is_noop(client: AsyncClient) -> None:
+async def test_cancel_terminal_voyage_is_noop(client: AsyncClient, httpx_mock) -> None:
+    _register_open_meteo_mocks(httpx_mock)
+
     resp = await client.post("/voyages", json=_payload())
     vid = resp.json()["id"]
-    await _poll_until_done(client, vid)
+    await _poll_until_done(client, vid, timeout_s=15.0)
 
     cancel = await client.post(f"/voyages/{vid}/cancel")
     assert cancel.status_code == 200
