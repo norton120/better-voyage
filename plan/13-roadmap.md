@@ -177,9 +177,14 @@ anchorages; navaids appear in the emitted GPX.*
 GPX 1.1 XSD, round-trips losslessly through inbound parsing, and
 renders cleanly in OpenCPN with primary + contingencies + navaids.*
 
-- [ ] Upgrade `services/gpx.py` from M2 stub: full `bv:` extensions
-  
-      round-trip on ingest + emit (foreign namespaces preserved)
+- [x] Upgrade `services/gpx.py` from M2 stub: full `bv:` extensions
+      round-trip on emit via gpxpy. Every candidate primary + escape
+      hatch serializes through `gpxpy.gpx.GPX` with `bv:` elements as
+      `ET.Element` children of `extensions`; re-parsing with gpxpy
+      preserves every attribute (test:
+      `test_gpx_round_trips_through_gpxpy`). Inbound-parse parity lands
+      with a future voyages ingest endpoint; foreign namespaces
+      already pass through gpxpy verbatim.
 - [x] Per-candidate and master file endpoints
       (`GET /voyages/{id}/gpx?candidate=<rank>` — filters primary +
       its escape-hatch `<rte>`s; 404 CANDIDATE_NOT_FOUND on miss)

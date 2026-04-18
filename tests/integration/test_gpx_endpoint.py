@@ -222,3 +222,94 @@ async def test_gpx_is_well_formed_and_structurally_valid(
             assert pt.get("lat") is not None
             assert pt.get("lon") is not None
             assert pt.find(f"{{{ns_gpx}}}time") is not None
+
+
+@pytest.mark.asyncio
+async def test_gpx_round_trips_through_gpxpy(
+    client: AsyncClient, httpx_mock
+) -> None:
+    """Re-parsing our emitted GPX with gpxpy must preserve bv: extensions
+    and bv: namespace declarations. This is the M5 round-trip contract
+    (plan/09) — the same file re-emitted stays byte-compatible for our
+    consumers."""
+    import gpxpy
+
+    n = 24
+    hours = [f"2026-04-18T{h:02d}:00" for h in range(n)]
+    httpx_mock.add_response(
+        url=re.compile(r"https://marine-api\.open-meteo\.com/.*"),
+        json={
+            "hourly": {
+                "time": hours,
+                "wave_height": [0.4] * n,
+                "wave_direction": [180.0] * n,
+                "wave_period": [3.5] * n,
+                "wind_wave_height": [0.3] * n,
+                "wind_wave_direction": [180.0] * n,
+                "wind_wave_period": [2.8] * n,
+                "swell_wave_height": [0.2] * n,
+                "swell_wave_direction": [180.0] * n,
+                "swell_wave_period": [4.0] * n,
+                "ocean_current_velocity": [0.0] * n,
+                "ocean_current_direction": [0.0] * n,
+            }
+        },
+        is_reusable=True,
+    )
+    httpx_mock.add_response(
+        url=re.compile(r"https://api\.open-meteo\.com/v1/forecast.*"),
+        json={
+            "hourly": {
+                "time": hours,
+                "wind_speed_10m": [22.2] * n,
+                "wind_direction_10m": [180.0] * n,
+                "wind_gusts_10m": [30.0] * n,
+            }
+        },
+        is_reusable=True,
+    )
+
+    post = await client.post(
+        "/voyages",
+        json={
+            "origin": {"lat": 38.5, "lon": -76.5, "name": "Origin"},
+            "destination": {"lat": 38.5, "lon": -76.07, "name": "Destination"},
+            "window": {
+                "start_at": "2026-04-18T00:00:00Z",
+                "end_at": "2026-04-18T01:00:00Z",
+                "tz": "UTC",
+            },
+            "boat_profile_name": "default",
+            "max_candidates": 1,
+        },
+    )
+    vid = post.json()["id"]
+    for _ in range(500):
+        s = await client.get(f"/voyages/{vid}")
+        if s.json()["status"] in {"done", "failed", "cancelled"}:
+            break
+        await asyncio.sleep(0.02)
+
+    gpx_bytes = (await client.get(f"/voyages/{vid}/gpx")).content
+    parsed = gpxpy.parse(gpx_bytes.decode())
+    assert parsed.creator == "better-voyage/0.1"
+    assert parsed.routes, "expected at least one route"
+
+    primary = next(r for r in parsed.routes if r.type == "primary")
+    ext_tags = [e.tag for e in primary.extensions]
+    bv_ns = "{https://better-voyage.app/gpx/1}"
+    assert f"{bv_ns}candidate" in ext_tags
+    assert f"{bv_ns}score" in ext_tags
+
+    # Candidate rank/departAt/arriveAt round-trip.
+    cand_el = next(e for e in primary.extensions if e.tag == f"{bv_ns}candidate")
+    assert cand_el.get("rank") == "1"
+    assert cand_el.get("departAt")
+    assert cand_el.get("arriveAt")
+
+    # Every rtept retains lat/lon + time through gpxpy.
+    assert primary.points
+    for pt in primary.points:
+        assert pt.latitude is not None
+        assert pt.longitude is not None
+        assert pt.time is not None

@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from datetime import time as dtime
 from typing import Any
-from xml.sax.saxutils import escape
 from zoneinfo import ZoneInfo
 
 from app.db import session_scope
@@ -39,6 +38,7 @@ from app.services.contingency import (
     plan_escape_hatches,
 )
 from app.services.forecast_field import ForecastField
+from app.services.gpx import emit_voyage
 from app.services.jobs import set_stage, write_progress
 from app.services.polars import Polar
 from app.services.router import (
@@ -363,7 +363,7 @@ async def _stage_finalizing(state: PlanState) -> None:
     with _tracer.start_as_current_span("job.finalizing"):
         _derive_contingencies(state)
         await _render_summaries(state)
-        gpx = _emit_gpx(state)
+        gpx = emit_voyage(state)
         coverage = json.dumps(_coverage_payload(state))
         async with session_scope() as session:
             row = await session.get(Voyage, state.voyage_id)
@@ -442,148 +442,6 @@ async def _render_summaries(state: PlanState) -> None:
         c.summary = await summarize(
             candidate=c, req=state.req, tz_name=state.req.window.tz
         )
-
-
-# --- GPX emission --------------------------------------------------------
-
-
-def _emit_escape_hatch_rte(c: Candidate, h: EscapeHatch) -> str:
-    """Serialize an escape-hatch route per plan/06 §3.
-
-    Referenced back to the primary via `bv:parentRtept` (decision-point
-    index) and `bv:candidateRank`. Trigger values are emitted as
-    attributes so OpenCPN tools / the API can read them directly.
-    """
-    trig_attrs = " ".join(f'{k}="{v}"' for k, v in h.trigger.items())
-    pts = h.route.points
-    body: list[str] = []
-    for idx, p in enumerate(pts):
-        if idx == 0:
-            body.append(_rtept(p, "Escape start"))
-        elif idx == len(pts) - 1:
-            body.append(_rtept(p, escape(h.target_name)))
-        else:
-            body.append(_rtept(p))
-    body_str = "\n      ".join(body)
-    return (
-        "  <rte>\n"
-        f"    <name>Candidate {c.rank} — {escape(h.description)}</name>\n"
-        "    <type>escape_hatch_route</type>\n"
-        "    <extensions>"
-        f'<bv:candidateRank value="{c.rank}"/>'
-        f'<bv:contingencyKind value="escape_hatch_route"/>'
-        f'<bv:parentRtept index="{h.parent_rtept_index}"/>'
-        f"<bv:trigger {trig_attrs}/>"
-        "</extensions>\n"
-        f"    {body_str}\n"
-        "  </rte>"
-    )
-
-
-def _rtept(p: IsochronePoint, name: str = "", tapouts: list[TapOut] | None = None) -> str:
-    ext_bits: list[str] = []
-    if p.heading_deg is not None and p.bsp_kts > 0:
-        ext_bits.append(
-            f'<bv:leg bearingDeg="{p.heading_deg:.1f}" bspKts="{p.bsp_kts:.2f}"/>'
-        )
-    if tapouts:
-        ext_bits.append("<bv:tapOut>")
-        for t in tapouts:
-            ext_bits.append(
-                f'<bv:option name="{escape(t.name)}" '
-                f'lat="{t.lat:.6f}" lon="{t.lon:.6f}" '
-                f'detourNm="{t.detour_nm:.2f}" '
-                f'type="{escape(t.type or "")}"/>'
-            )
-        ext_bits.append("</bv:tapOut>")
-    extras = f"<extensions>{''.join(ext_bits)}</extensions>" if ext_bits else ""
-    name_el = f"<name>{escape(name)}</name>" if name else ""
-    return (
-        f'<rtept lat="{p.lat:.6f}" lon="{p.lon:.6f}">'
-        f"{name_el}<time>{p.t.isoformat()}</time>{extras}"
-        f"</rtept>"
-    )
-
-
-def _emit_gpx(state: PlanState) -> bytes:
-    """Emit a GPX 1.1 doc with one <rte> per surfaced candidate.
-
-    `services/gpx.py` replaces this with a fully round-trip-safe
-    serializer at M5 (plan/09); for now it's enough to produce a file
-    that loads cleanly in OpenCPN and carries the `bv:` score + rank.
-    """
-    req = state.req
-    origin_label = escape(req.origin.name or "Origin")
-    dest_label = escape(req.destination.name or "Destination")
-
-    metadata_xml = ""
-    if state.forecast_stale_at is not None:
-        metadata_xml = (
-            "  <metadata><extensions>"
-            f'<bv:coverage forecastStaleAt="{state.forecast_stale_at.isoformat()}"/>'
-            "</extensions></metadata>\n"
-        )
-
-    rtes: list[str] = []
-    for c in state.candidates:
-        pts = c.route.points
-        body: list[str] = []
-        for idx, p in enumerate(pts):
-            tapouts = c.tapouts_by_index.get(idx)
-            if idx == 0:
-                body.append(_rtept(p, "Origin"))
-            elif idx == len(pts) - 1:
-                body.append(_rtept(p, "Destination"))
-            else:
-                body.append(_rtept(p, tapouts=tapouts))
-        body_str = "\n      ".join(body)
-
-        backup_xml = ""
-        if c.backup_destinations:
-            options = "".join(
-                f'<bv:option name="{escape(b.name)}" '
-                f'lat="{b.lat:.6f}" lon="{b.lon:.6f}" '
-                f'detourNm="{b.detour_nm:.2f}"/>'
-                for b in c.backup_destinations
-            )
-            backup_xml = f"<bv:backupDestinations>{options}</bv:backupDestinations>"
-
-        summary_xml = ""
-        if c.summary is not None:
-            summary_xml = (
-                f'<bv:summaryMd source="{escape(c.summary.source)}">'
-                f"{escape(c.summary.text)}"
-                "</bv:summaryMd>"
-            )
-
-        rtes.append(
-            "  <rte>\n"
-            f"    <name>Candidate {c.rank}: {origin_label} -> {dest_label}</name>\n"
-            f"    <type>primary</type>\n"
-            "    <extensions>"
-            f'<bv:candidate rank="{c.rank}" '
-            f'departAt="{c.depart_at.isoformat()}" '
-            f'arriveAt="{c.route.reached_at.isoformat()}"/>'
-            f'<bv:score total="{c.score.total:.2f}"/>'
-            f"{summary_xml}"
-            f"{backup_xml}"
-            "</extensions>\n"
-            f"    {body_str}\n"
-            "  </rte>"
-        )
-        # Escape-hatch routes emitted as siblings after their parent.
-        for h in c.escape_hatches:
-            rtes.append(_emit_escape_hatch_rte(c, h))
-
-    return (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        '<gpx version="1.1" creator="better-voyage/0.1"\n'
-        '     xmlns="http://www.topografix.com/GPX/1/1"\n'
-        '     xmlns:bv="https://better-voyage.app/gpx/1">\n'
-        f"{metadata_xml}"
-        f"{chr(10).join(rtes)}\n"
-        "</gpx>\n"
-    ).encode()
 
 
 # --- top-level entry -----------------------------------------------------
