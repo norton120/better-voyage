@@ -87,3 +87,88 @@ def test_find_tapouts_filters_hazards_and_ranks_by_distance() -> None:
     assert "Hazard-X" not in names
     # Sorted by detour_nm ascending.
     assert out == sorted(out, key=lambda t: t.detour_nm)
+
+
+# --- escape-hatch helpers --------------------------------------------------
+
+
+def test_env_trigger_fires_on_seas_threshold() -> None:
+    from app.services.contingency import ESCAPE_SEAS_M, _env_trigger
+    from app.services.forecast_field import Env
+
+    decision = IsochronePoint(lat=38.5, lon=-76.3, t=datetime(2026, 4, 18, 4, tzinfo=UTC))
+    calm_env = Env(
+        wind_speed_kts=10, wind_dir_deg=180, wind_gust_kts=12,
+        wave_height_m=0.5, wave_period_s=4, wave_dir_deg=180,
+        current_speed_kts=0, current_dir_deg=0,
+    )
+    rough_env = Env(
+        wind_speed_kts=12, wind_dir_deg=180, wind_gust_kts=14,
+        wave_height_m=ESCAPE_SEAS_M + 0.7, wave_period_s=5, wave_dir_deg=180,
+        current_speed_kts=0, current_dir_deg=0,
+    )
+    downstream = [
+        IsochronePoint(lat=38.5, lon=-76.2, t=decision.t, env=calm_env),
+        IsochronePoint(lat=38.5, lon=-76.1, t=decision.t, env=rough_env),
+    ]
+    trig = _env_trigger(decision, downstream)
+    assert trig is not None
+    assert trig["seas_m_gt"] == pytest.approx(ESCAPE_SEAS_M + 0.7, abs=0.01)
+    assert "wind_kts_gt" not in trig
+
+
+def test_env_trigger_none_on_calm_downstream() -> None:
+    from app.services.contingency import _env_trigger
+    from app.services.forecast_field import Env
+
+    calm = Env(
+        wind_speed_kts=8, wind_dir_deg=180, wind_gust_kts=10,
+        wave_height_m=0.4, wave_period_s=4, wave_dir_deg=180,
+        current_speed_kts=0, current_dir_deg=0,
+    )
+    pts = [
+        IsochronePoint(lat=38.5, lon=-76.3, t=datetime(2026, 4, 18, 4, tzinfo=UTC), env=calm),
+    ]
+    assert _env_trigger(pts[0], pts) is None
+
+
+def test_tightened_reduces_seas_limit() -> None:
+    from app.services.contingency import _tightened
+    from app.services.router import BoatLimits
+
+    b = BoatLimits(max_seas_m=2.5, max_wind_kts=30)
+    tight = _tightened(b, {"seas_m_gt": 2.4})
+    # target = max(0.5, 2.4 - 0.5) = 1.9, min(2.5, 1.9) = 1.9
+    assert tight.max_seas_m == pytest.approx(1.9)
+    # Wind limit pass-through.
+    assert tight.max_wind_kts == 30
+
+
+def test_meaningfully_different_true_on_offset_path() -> None:
+    from app.services.contingency import _meaningfully_different
+
+    primary = [
+        IsochronePoint(lat=38.5, lon=-76.5 + i * 0.05, t=datetime(2026, 4, 18, tzinfo=UTC))
+        for i in range(10)
+    ]
+    # Alt path offset ~3 nm north (> ESCAPE_DIVERGENCE_NM default 2)
+    alt = [
+        IsochronePoint(lat=38.55, lon=-76.5 + i * 0.05, t=datetime(2026, 4, 18, tzinfo=UTC))
+        for i in range(10)
+    ]
+    assert _meaningfully_different(alt, primary) is True
+
+
+def test_meaningfully_different_false_on_near_identical_path() -> None:
+    from app.services.contingency import _meaningfully_different
+
+    primary = [
+        IsochronePoint(lat=38.5, lon=-76.5 + i * 0.05, t=datetime(2026, 4, 18, tzinfo=UTC))
+        for i in range(10)
+    ]
+    # Same path — Fréchet = 0, below threshold.
+    alt = [
+        IsochronePoint(lat=38.5, lon=-76.5 + i * 0.05, t=datetime(2026, 4, 18, tzinfo=UTC))
+        for i in range(10)
+    ]
+    assert _meaningfully_different(alt, primary) is False

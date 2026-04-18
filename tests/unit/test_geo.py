@@ -7,6 +7,7 @@ import pytest
 from app.services.geo import (
     advance,
     bearing_deg,
+    discrete_frechet_nm,
     distance_nm,
     relative_wind_angle,
 )
@@ -38,6 +39,35 @@ def test_advance_round_trip_returns_origin() -> None:
     lat3, lon3 = advance(lat2, lon2, back_b, 50.0)
     assert lat3 == pytest.approx(ANNAPOLIS[0], abs=1e-6)
     assert lon3 == pytest.approx(ANNAPOLIS[1], abs=1e-6)
+
+
+def test_discrete_frechet_identical_paths_is_zero() -> None:
+    path = [(38.5, -76.5 + i * 0.05) for i in range(10)]
+    assert discrete_frechet_nm(path, path) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_discrete_frechet_parallel_paths_equal_offset() -> None:
+    # Two parallel paths offset ~3 nm north; Fréchet = constant offset.
+    a = [(38.5, -76.5 + i * 0.05) for i in range(6)]
+    b = [(38.55, -76.5 + i * 0.05) for i in range(6)]
+    d = discrete_frechet_nm(a, b)
+    # 0.05 deg lat ≈ 3 nm.
+    assert 2.5 < d < 3.5
+
+
+def test_discrete_frechet_handles_length_mismatch() -> None:
+    a = [(38.5, -76.5), (38.5, -76.3), (38.5, -76.1)]
+    b = [(38.5, -76.3)]
+    d = discrete_frechet_nm(a, b)
+    # Worst-case matching distance = dist(endpoints, only-point-on-b)
+    expected = distance_nm(38.5, -76.5, 38.5, -76.3)
+    # b has only one point so it matches that point against every a[i].
+    assert d == pytest.approx(expected, rel=0.05)
+
+
+def test_discrete_frechet_empty_returns_inf() -> None:
+    assert discrete_frechet_nm([], [(38.5, -76.5)]) == float("inf")
+    assert discrete_frechet_nm([(38.5, -76.5)], []) == float("inf")
 
 
 def test_relative_wind_angle_symmetric() -> None:

@@ -151,19 +151,25 @@ anchorages; navaids appear in the emitted GPX.*
 
 - [x] Backup-anchorage selection on the destination rtept
 
-- [ ] Escape-hatch re-routing (isochrone from decision point with
-  
-      tightened constraints / alternate endpoint)
+- [x] Escape-hatch re-routing (`plan_escape_hatches` — isochrone from
+      each decision point to the nearest refuge POI with tightened
+      `max_seas_m`; triggers on `ESCAPE_SEAS_M` / `ESCAPE_WIND_KTS`
+      downstream env breaches)
 
-- [ ] Discrete Fréchet check to suppress trivial re-routes
+- [x] Discrete Fréchet check to suppress trivial re-routes
+      (`geo.discrete_frechet_nm`, cutoff `ESCAPE_DIVERGENCE_NM=2.0`)
 
-- [ ] Escape-hatch routes emitted as additional `<rte>` elements
+- [x] Escape-hatch routes emitted as additional `<rte>` elements
+      (`bv:contingencyKind=escape_hatch_route`, `bv:parentRtept`,
+      `bv:trigger`)
 
 - [ ] Navaids from `ChartStore.navaids_in(bbox)` emitted as `<wpt>`
   
-      within `NAVAID_BBOX_PAD_NM` of any route leg
+      within `NAVAID_BBOX_PAD_NM` of any route leg (blocked on M2
+      chart ingest)
 
-- [ ] Metrics: `bv.contingencies.emitted{kind}`
+- [x] Metrics: `bv.contingencies.emitted{kind}`
+      (`kind ∈ backup_destination|tap_out|escape_hatch_route`)
 
 ## M5 — GPX polish & validation
 

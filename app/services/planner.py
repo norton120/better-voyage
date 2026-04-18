@@ -31,10 +31,12 @@ from app.services import boat_profiles
 from app.services.charts import NullChartStore
 from app.services.contingency import (
     BackupDestination,
+    EscapeHatch,
     TapOut,
     decision_points,
     find_backup_destinations,
     find_tapouts,
+    plan_escape_hatches,
 )
 from app.services.forecast_field import ForecastField
 from app.services.jobs import set_stage, write_progress
@@ -99,6 +101,7 @@ class Candidate:
     backup_destinations: list[BackupDestination] = field(default_factory=list)
     # Map from rtept index within route.points to its tap-out list.
     tapouts_by_index: dict[int, list[TapOut]] = field(default_factory=dict)
+    escape_hatches: list[EscapeHatch] = field(default_factory=list)
     summary: Summary | None = None
 
 
@@ -113,6 +116,10 @@ class PlanState:
     # stale during prefetch. Lifted off `forecast.stale_at` so it
     # survives after the `ForecastField` is discarded.
     forecast_stale_at: datetime | None = None
+    # Stashed during routing for reuse in contingency generation.
+    polar: Polar | None = None
+    boat: BoatLimits | None = None
+    charts: NullChartStore | None = None
 
 
 def _bbox_from_request(req: VoyageRequest, pad_deg: float = 0.5) -> tuple[float, float, float, float]:
@@ -261,6 +268,9 @@ async def _stage_routing(state: PlanState) -> None:
     )
 
     charts = NullChartStore()
+    state.polar = polar
+    state.boat = boat
+    state.charts = charts
     departures = enumerate_departures(state.req)
     _candidates_total.add(len(departures))
 
@@ -373,6 +383,14 @@ def _coverage_payload(state: PlanState) -> dict[str, Any]:
     }
     if state.forecast_stale_at is not None:
         payload["forecast_stale_at"] = state.forecast_stale_at.isoformat()
+    if state.candidates:
+        payload["contingencies"] = {
+            "backup_destinations": sum(len(c.backup_destinations) for c in state.candidates),
+            "tap_outs": sum(
+                len(v) for c in state.candidates for v in c.tapouts_by_index.values()
+            ),
+            "escape_hatch_routes": sum(len(c.escape_hatches) for c in state.candidates),
+        }
     return payload
 
 
@@ -393,14 +411,29 @@ async def _write_coverage(state: PlanState) -> None:
 def _derive_contingencies(state: PlanState) -> None:
     dest_lat = state.req.destination.lat
     dest_lon = state.req.destination.lon
+    assert state.forecast is not None
+    assert state.polar is not None
+    assert state.boat is not None
+    assert state.charts is not None
     for c in state.candidates:
         c.backup_destinations = find_backup_destinations(dest_lat, dest_lon)
         picks = decision_points(c.route.points)
         by_index: dict[int, list[TapOut]] = {}
+        picked_indices: list[int] = []
         for p in picks:
             idx = c.route.points.index(p)
+            picked_indices.append(idx)
             by_index[idx] = find_tapouts(p)
         c.tapouts_by_index = by_index
+        c.escape_hatches = plan_escape_hatches(
+            primary=c.route,
+            decision_indices=picked_indices,
+            boat=state.boat,
+            forecast=state.forecast,
+            polar=state.polar,
+            charts=state.charts,
+            objective=state.req.objective,
+        )
 
 
 async def _render_summaries(state: PlanState) -> None:
@@ -412,6 +445,39 @@ async def _render_summaries(state: PlanState) -> None:
 
 
 # --- GPX emission --------------------------------------------------------
+
+
+def _emit_escape_hatch_rte(c: Candidate, h: EscapeHatch) -> str:
+    """Serialize an escape-hatch route per plan/06 §3.
+
+    Referenced back to the primary via `bv:parentRtept` (decision-point
+    index) and `bv:candidateRank`. Trigger values are emitted as
+    attributes so OpenCPN tools / the API can read them directly.
+    """
+    trig_attrs = " ".join(f'{k}="{v}"' for k, v in h.trigger.items())
+    pts = h.route.points
+    body: list[str] = []
+    for idx, p in enumerate(pts):
+        if idx == 0:
+            body.append(_rtept(p, "Escape start"))
+        elif idx == len(pts) - 1:
+            body.append(_rtept(p, escape(h.target_name)))
+        else:
+            body.append(_rtept(p))
+    body_str = "\n      ".join(body)
+    return (
+        "  <rte>\n"
+        f"    <name>Candidate {c.rank} — {escape(h.description)}</name>\n"
+        "    <type>escape_hatch_route</type>\n"
+        "    <extensions>"
+        f'<bv:candidateRank value="{c.rank}"/>'
+        f'<bv:contingencyKind value="escape_hatch_route"/>'
+        f'<bv:parentRtept index="{h.parent_rtept_index}"/>'
+        f"<bv:trigger {trig_attrs}/>"
+        "</extensions>\n"
+        f"    {body_str}\n"
+        "  </rte>"
+    )
 
 
 def _rtept(p: IsochronePoint, name: str = "", tapouts: list[TapOut] | None = None) -> str:
@@ -505,6 +571,9 @@ def _emit_gpx(state: PlanState) -> bytes:
             f"    {body_str}\n"
             "  </rte>"
         )
+        # Escape-hatch routes emitted as siblings after their parent.
+        for h in c.escape_hatches:
+            rtes.append(_emit_escape_hatch_rte(c, h))
 
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
