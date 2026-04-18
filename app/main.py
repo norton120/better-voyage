@@ -7,7 +7,7 @@ from app import __version__
 from app.db import engine, init_db
 from app.logging import configure_logging, get_logger
 from app.observability import setup_observability
-from app.routers import boat_profiles, health, voyages
+from app.routers import boat_profiles, health, pois, voyages
 from app.services.boat_profiles import ensure_default_seeded
 from app.services.jobs import JobRegistry
 from app.services.planner import run_job
@@ -42,3 +42,4 @@ app = FastAPI(
 app.include_router(health.router)
 app.include_router(voyages.router)
 app.include_router(boat_profiles.router)
+app.include_router(pois.router)

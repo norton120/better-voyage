@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="better-voyage/0.1"
+     xmlns="http://www.topografix.com/GPX/1/1"
+     xmlns:bv="https://better-voyage.app/gpx/1">
+  <metadata>
+    <name>better-voyage seed POIs (Chesapeake)</name>
+    <desc>Hand-curated anchorages, marinas, and harbors of refuge. Supplement via BV_POI_DIRS.</desc>
+  </metadata>
+  <wpt lat="38.9784" lon="-76.4922">
+    <name>Annapolis Harbor</name>
+    <sym>Marina</sym>
+    <type>marina</type>
+    <desc>City dock; fuel; transient moorings in Spa Creek</desc>
+    <extensions>
+      <bv:amenities>fuel,water,pumpout,dockage</bv:amenities>
+      <bv:vhfChannel>17</bv:vhfChannel>
+      <bv:shelterQuadrants>N,NE,E,SE,S,SW,W,NW</bv:shelterQuadrants>
+    </extensions>
+  </wpt>
+  <wpt lat="37.5407" lon="-76.2914">
+    <name>Deltaville Anchorage</name>
+    <sym>Anchor</sym>
+    <type>anchorage</type>
+    <desc>Jackson Creek — excellent protection</desc>
+    <extensions>
+      <bv:shelterQuadrants>N,NE,E,SE,S,SW,W,NW</bv:shelterQuadrants>
+      <bv:depthM>3.0</bv:depthM>
+    </extensions>
+  </wpt>
+  <wpt lat="38.5825" lon="-76.0719">
+    <name>Solomons Island</name>
+    <sym>Marina</sym>
+    <type>marina</type>
+    <desc>Harbor of refuge; several marinas; fuel</desc>
+    <extensions>
+      <bv:amenities>fuel,water,transient_slips,showers</bv:amenities>
+      <bv:vhfChannel>16</bv:vhfChannel>
+      <bv:shelterQuadrants>N,NE,E,SE,S,SW,W,NW</bv:shelterQuadrants>
+    </extensions>
+  </wpt>
+  <wpt lat="38.3174" lon="-76.4461">
+    <name>Point No Point Shoal</name>
+    <sym>Shoal</sym>
+    <type>hazard</type>
+    <desc>Extends ~2 nm SW from the lighthouse; avoid at low tide</desc>
+    <extensions>
+      <bv:depthM>0.8</bv:depthM>
+    </extensions>
+  </wpt>
+  <wpt lat="36.9630" lon="-76.2937">
+    <name>Hampton Roads Entrance</name>
+    <sym>Waypoint</sym>
+    <type>waypoint</type>
+    <desc>Approach to Norfolk / Hampton Roads; watch for commercial traffic</desc>
+  </wpt>
+  <wpt lat="36.8467" lon="-76.2929">
+    <name>Norfolk Waterside</name>
+    <sym>Marina</sym>
+    <type>marina</type>
+    <desc>Downtown Norfolk; Waterside Marina; transient slips</desc>
+    <extensions>
+      <bv:amenities>fuel,water,transient_slips</bv:amenities>
+      <bv:vhfChannel>16</bv:vhfChannel>
+      <bv:shelterQuadrants>N,NE,E,SE,S,SW,W,NW</bv:shelterQuadrants>
+    </extensions>
+  </wpt>
+</gpx>
