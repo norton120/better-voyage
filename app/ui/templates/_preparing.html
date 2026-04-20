@@ -1,0 +1,51 @@
+{% macro banner_body() %}
+  {% if status == "preparing" %}
+    <strong>preparing charts…</strong>
+    <p>downloading the global GEBCO bathymetry grid (~4 GB zipped, ~8 GB extracted). this is a one-time setup; subsequent starts will be instant.</p>
+    {% if bytes_total %}
+      {% set pct = (100 * bytes_done / bytes_total) | round(1) %}
+      <div class="progress">
+        <div class="progress-bar" style="width: {{ pct }}%"></div>
+      </div>
+      <p class="muted">{{ phase or "working" }} — {{ detail }}</p>
+    {% elif detail %}
+      <p class="muted">{{ detail }}</p>
+    {% else %}
+      <p class="muted">connecting…</p>
+    {% endif %}
+  {% elif status == "failed" %}
+    <strong>chart preparation failed</strong>
+    <p>{{ detail or "unknown error" }}</p>
+    <p class="muted">check <code>BV_GEBCO_DOWNLOAD_URL</code> and disk space, or pre-stage the file and set <code>BV_GEBCO_PATH</code>.</p>
+  {% endif %}
+{% endmacro %}
+{% if is_partial %}
+<div class="preparing-banner preparing-{{ status }}">{{ banner_body() }}</div>
+{% else %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>better-voyage — preparing charts</title>
+  <link rel="stylesheet" href="/static/ui.css" />
+  <script src="https://unpkg.com/htmx.org@1.9.12"
+          integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2"
+          crossorigin="anonymous"></script>
+</head>
+<body>
+  <header>
+    <h1>better-voyage</h1>
+    <p class="sub">first-time setup</p>
+  </header>
+  <main>
+    <section id="preparing-pane"
+             hx-get="/ui/charts/status"
+             hx-trigger="load, every 3s"
+             hx-swap="innerHTML">
+      <div class="preparing-banner preparing-{{ status }}">{{ banner_body() }}</div>
+    </section>
+  </main>
+</body>
+</html>
+{% endif %}

@@ -114,6 +114,7 @@ class ChartStoreProtocol(Protocol):
     def is_restricted(self, pt: Coord) -> bool: ...
     def chart_depth(self, lat: float, lon: float) -> float | None: ...
     def available_depth(self, lat: float, lon: float, t: datetime) -> float | None: ...
+    def distance_to_land_nm(self, lat: float, lon: float) -> float: ...
     def navaids_in(self, bbox: Bbox) -> list[Waypoint]: ...
 
 
@@ -288,15 +289,21 @@ class ChartStore:
             )
 
     def chart_depth(self, lat: float, lon: float) -> float | None:
-        """ENC DEPARE shallow polygons override; else GEBCO bilinear."""
+        """ENC DEPARE shallow polygons override; else GEBCO bilinear.
+
+        `_shallow_drval` holds DRVAL2 (upper bound) — shallow polygons
+        emitted by the ENC preprocessor already satisfy DRVAL2 < cutoff,
+        so the entire polygon is guaranteed shallower than the cutoff.
+        Using the upper bound gives the router the best-case depth it
+        can possibly see inside that polygon, which is still a safe
+        lower bound vs. any point that actually needs routing through.
+        """
         _queries.add(1, {"kind": "depth"})
         if self._shallow_tree is not None:
             p = Point(lon, lat)
             idx = self._shallow_tree.query(p)
             for i in idx:
                 if self._shallow_geoms[i].contains(p):
-                    # DRVAL1 is the *minimum* depth at chart datum.
-                    # Treat that as the available depth.
                     return float(self._shallow_drval[i])
         if self._gebco is None:
             return None
@@ -313,6 +320,25 @@ class ChartStore:
         # Tide offset is a future plumbing slot. Return chart_depth
         # unchanged until the interpolator lands; see plan/15 §available_depth.
         return depth
+
+    def distance_to_land_nm(self, lat: float, lon: float) -> float:
+        """Nearest distance from a point to any loaded land geometry.
+
+        Used by the router's graduated-step logic: when a frontier
+        point is close to shore, the router drops to a shorter time
+        step so its straight-line segments don't jump over narrow
+        channels. Conversion assumes 1° latitude ≈ 60 nm (fine near
+        the router's use case of US coastal waters; a 20 % error at
+        60°N is tolerable since the threshold is an order-of-magnitude
+        decision, not a precise distance).
+        """
+        if self._land_tree is None or not self._land_geoms:
+            return float("inf")
+        p = Point(lon, lat)
+        # STRtree.nearest returns the index of the single nearest geom.
+        idx = self._land_tree.nearest(p)
+        deg = p.distance(self._land_geoms[idx])
+        return deg * 60.0
 
     def navaids_in(self, bbox: Bbox) -> list[Waypoint]:
         _queries.add(1, {"kind": "navaid"})
@@ -430,7 +456,12 @@ class ChartStore:
                 if layer == "land":
                     src.layers.land.append(geom)
                 elif layer == "shallow":
-                    drval = float(props.get("drval1_m") or 0.0)
+                    # Prefer DRVAL2 (upper-bound depth across the polygon);
+                    # ENC preprocessor guarantees this < shallow_cutoff.
+                    drval_raw = props.get("drval2_m")
+                    if drval_raw is None:
+                        drval_raw = props.get("drval1_m") or 0.0
+                    drval = float(drval_raw)
                     src.layers.shallow.append((geom, drval))
                 elif layer == "obstacle":
                     src.layers.obstacles.append(
@@ -616,6 +647,9 @@ class NullChartStore:
     def available_depth(self, lat: float, lon: float, t: datetime) -> float | None:
         return 100.0
 
+    def distance_to_land_nm(self, lat: float, lon: float) -> float:
+        return float("inf")
+
     def navaids_in(self, bbox: Bbox) -> list[Waypoint]:
         return []
 
@@ -648,14 +682,15 @@ def get_chart_store() -> ChartStore | NullChartStore:
         log.info("charts.store.null_mode")
         _instance = NullChartStore()
     else:
+        gebco_path = settings.effective_gebco_path()
         log.info(
             "charts.store.real_mode",
             charts_dir=str(settings.charts_dir),
-            gebco_path=str(settings.gebco_path) if settings.gebco_path else None,
+            gebco_path=str(gebco_path),
         )
         _instance = ChartStore(
             base_dir=settings.charts_dir,
-            gebco_path=settings.gebco_path,
+            gebco_path=gebco_path,
         )
     return _instance
 

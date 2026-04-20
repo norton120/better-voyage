@@ -440,10 +440,10 @@ def test_obstacles_preserve_valsou_as_clearance(
 
 
 # ---------------------------------------------------------------------
-# Restricted: RESARE + CTNARE + MARCUL union into one feature
+# Restricted: RESARE + MARCUL union into one feature; CTNARE/DRGARE excluded
 
 
-def test_restricted_unions_three_layers(
+def test_restricted_unions_resare_and_marcul_and_ignores_ctnare_drgare(
     fake_cell_path: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -451,17 +451,27 @@ def test_restricted_unions_three_layers(
     resare = _gdf(
         [{"geometry": Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])}]
     )
+    marcul = _gdf(
+        [{"geometry": Polygon([(10, 10), (11, 10), (11, 11), (10, 11)])}]
+    )
+    # CTNARE (caution-area, advisory only) + DRGARE (dredged channel,
+    # navigable) must NOT be classified as restricted — they routinely
+    # span huge offshore regions in small-scale cells and would block
+    # every route planned through US waters.
     ctnare = _gdf(
         [{"geometry": Polygon([(5, 5), (6, 5), (6, 6), (5, 6)])}]
     )
-    marcul = _gdf(
-        [{"geometry": Polygon([(10, 10), (11, 10), (11, 11), (10, 11)])}]
+    drgare = _gdf(
+        [{"geometry": Polygon([(20, 20), (21, 20), (21, 21), (20, 21)])}]
     )
     monkeypatch.setattr(
         charts_enc.pyogrio,
         "read_dataframe",
         _make_fake_reader(
-            {"RESARE": resare, "CTNARE": ctnare, "MARCUL": marcul}
+            {
+                "RESARE": resare, "MARCUL": marcul,
+                "CTNARE": ctnare, "DRGARE": drgare,
+            }
         ),
     )
     out = tmp_path / "restricted.geojson"
@@ -473,8 +483,12 @@ def test_restricted_unions_three_layers(
         f for f in doc["features"] if f["properties"][LAYER_KEY] == "restricted"
     ]
     assert len(rests) == 1
-    # All three polygons are disjoint → MultiPolygon.
     assert rests[0]["geometry"]["type"] == "MultiPolygon"
+    # The restricted bounds should cover RESARE + MARCUL only
+    # (roughly lon 0..11, lat 0..11), NOT the CTNARE (5..6) or DRGARE (20..21).
+    from shapely.geometry import shape
+    g = shape(rests[0]["geometry"])
+    assert g.bounds[2] <= 11.0, f"DRGARE leaked in: bounds={g.bounds}"
 
 
 # ---------------------------------------------------------------------

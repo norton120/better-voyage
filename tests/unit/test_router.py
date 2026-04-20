@@ -81,6 +81,69 @@ def test_router_reaches_destination_on_beam_reach() -> None:
     assert result.reached_at > depart
 
 
+def test_router_graduated_steps_thread_a_tight_channel() -> None:
+    """Near-shore origins need short initial steps to avoid jumping over land.
+
+    The stub chart store below simulates a boat pinned between shores
+    by rejecting any segment longer than 3 nm as "crosses land". The
+    default 60-minute step at ~5 kts produces ~5 nm segments and would
+    always fail; graduated stepping drops to 10-minute (~0.8 nm)
+    segments when `distance_to_land_nm` reports the frontier is close
+    to shore, which threads the channel cleanly.
+    """
+    from app.services.geo import distance_nm
+
+    class TightChannelCharts:
+        def crosses_land(self, a, b) -> bool:
+            return distance_nm(a[0], a[1], b[0], b[1]) > 3.0
+
+        def crosses_obstacle(self, a, b) -> bool:
+            return False
+
+        def is_restricted(self, pt) -> bool:
+            return False
+
+        def available_depth(self, lat, lon, t):
+            return 100.0
+
+        def distance_to_land_nm(self, lat, lon) -> float:
+            return 1.0  # always "near shore" → graduated stepping kicks in
+
+        def navaids_in(self, bbox):
+            return []
+
+    polar = Polar.load(DEFAULT_POLAR_PATH)
+    depart = datetime(2026, 4, 18, 12, 0, tzinfo=UTC)
+    origin = (38.5, -76.5)
+    destination = (38.6, -76.5)  # 6 nm north — unreachable in one 60-min jump
+    field = _uniform_field(
+        lat_bounds=(38.3, 38.7),
+        lon_bounds=(-76.6, -76.4),
+        start=depart, hours=24,
+        wind_kts=15.0, wind_from_deg=270.0,  # beam reach
+    )
+
+    # Graduated stepping (default fine_step_minutes=10) succeeds.
+    result = plan_candidate(
+        origin=origin, destination=destination, depart_at=depart,
+        polar=polar, forecast=field, charts=TightChannelCharts(),
+        boat=BoatLimits(), arrival_tolerance_nm=0.5,
+    )
+    assert result.points[-1].lat == pytest.approx(destination[0], abs=0.01)
+    assert result.points[-1].lon == pytest.approx(destination[1], abs=0.01)
+
+    # Disabling graduated stepping (fine = coarse = 60min) fails for
+    # the same inputs — proves the feature, not a coincidence.
+    with pytest.raises(RouterError, match="ROUTE_NO_COVERAGE"):
+        plan_candidate(
+            origin=origin, destination=destination, depart_at=depart,
+            polar=polar, forecast=field, charts=TightChannelCharts(),
+            boat=BoatLimits(),
+            step_minutes=60, fine_step_minutes=60,
+            arrival_tolerance_nm=0.5,
+        )
+
+
 def test_router_raises_on_uncovered_origin() -> None:
     """Origin outside forecast bbox → no frontier → ROUTE_NO_COVERAGE."""
     polar = Polar.load(DEFAULT_POLAR_PATH)

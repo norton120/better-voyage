@@ -24,8 +24,7 @@ S-57 layers consumed (plan/15 §NOAA ENC):
     LNDARE, COALNE          -> land
     DEPARE (DRVAL1 < cutoff) -> shallow
     OBSTRN, WRECKS, UWTROC   -> obstacle (with clearance_m)
-    RESARE, CTNARE, MARCUL,
-    DRGARE                   -> restricted
+    RESARE, MARCUL           -> restricted (navigation prohibited)
     BOYLAT, BOYSAW, BCNLAT,
     LIGHTS, BRIDGE           -> navaid (with OpenCPN sym)
 
@@ -175,21 +174,29 @@ def preprocess_enc_cell(s57_path: Path, out_path: Path) -> EncCellMeta:
                 counts["land"] = 1
 
         # ---- shallow --------------------------------------------------
+        # Per S-57: DRVAL1 = minimum depth at chart datum (low tide);
+        # DRVAL2 = maximum depth. A DEPARE polygon covers a depth range
+        # across its area, so only flag polygons where the *entire* area
+        # is shallower than the cutoff. A (0, 18.2) polygon spans from
+        # drying to 18 m — returning 0 as "available depth" for any
+        # point inside it would incorrectly block a deep-water route.
+        # Mixed-depth DEPAREs are left to GEBCO's per-point bilinear.
         depare = _read_layer(s57_path, "DEPARE")
-        if depare is not None and not depare.empty and "DRVAL1" in depare.columns:
-            shallow = depare[depare["DRVAL1"].astype(float) < shallow_cutoff]
+        if depare is not None and not depare.empty and "DRVAL2" in depare.columns:
+            shallow = depare[depare["DRVAL2"].astype(float) <= shallow_cutoff]
             for _idx, row in shallow.iterrows():
                 geom = row.geometry
                 if geom is None or geom.is_empty:
                     continue
+                drval2 = float(row["DRVAL2"])
                 props: dict[str, Any] = {
                     LAYER_KEY: "shallow",
                     "source": "noaa_enc",
-                    "drval1_m": float(row["DRVAL1"]),
+                    "drval2_m": drval2,
                 }
-                if "DRVAL2" in depare.columns and row.get("DRVAL2") is not None:
+                if "DRVAL1" in depare.columns and row.get("DRVAL1") is not None:
                     with contextlib.suppress(TypeError, ValueError):
-                        props["drval2_m"] = float(row["DRVAL2"])
+                        props["drval1_m"] = float(row["DRVAL1"])
                 features.append(_feature(geom, props))
                 counts["shallow"] += 1
 
@@ -229,8 +236,16 @@ def preprocess_enc_cell(s57_path: Path, out_path: Path) -> EncCellMeta:
                 counts["obstacle"] += 1
 
         # ---- restricted ----------------------------------------------
+        # RESARE is the only layer that actually prohibits navigation
+        # (security zones, firing ranges). MARCUL (marine cultivation:
+        # fish/oyster farms) is a physical obstruction so we fence it
+        # off too. CTNARE (caution area) is purely advisory — and in
+        # small-scale (US2*/US3*) cells spans entire offshore regions,
+        # which would kill routing. DRGARE (dredged area) is a
+        # navigable channel — including it blocked the very fairways
+        # the boat should be using. Neither belongs in this set.
         restricted_geoms: list[BaseGeometry] = []
-        for layer_name in ("RESARE", "CTNARE", "MARCUL", "DRGARE"):
+        for layer_name in ("RESARE", "MARCUL"):
             df = _read_layer(s57_path, layer_name)
             if df is None or df.empty:
                 continue

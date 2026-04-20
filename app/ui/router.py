@@ -53,8 +53,26 @@ BV_NS = "https://better-voyage.app/gpx/1"
 # ---------------------------------------------------------------------------
 
 
+def _readiness_ctx(readiness: Any, is_partial: bool) -> dict[str, Any]:
+    return {
+        "status": readiness.status if readiness else "preparing",
+        "detail": readiness.detail if readiness else "",
+        "phase": getattr(readiness, "phase", "") if readiness else "",
+        "bytes_done": getattr(readiness, "bytes_done", 0) if readiness else 0,
+        "bytes_total": getattr(readiness, "bytes_total", 0) if readiness else 0,
+        "is_partial": is_partial,
+    }
+
+
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> Response:
+    readiness = getattr(request.app.state, "charts_ready", None)
+    if readiness is not None and readiness.status != "ready":
+        return templates.TemplateResponse(
+            request,
+            "_preparing.html",
+            _readiness_ctx(readiness, is_partial=False),
+        )
     profiles = await boat_profiles.list_all()
     return templates.TemplateResponse(
         request,
@@ -66,6 +84,26 @@ async def index(request: Request) -> Response:
                 profiles[0].name if profiles else "default",
             ),
         },
+    )
+
+
+@router.get("/ui/charts/status", response_class=HTMLResponse)
+async def charts_status(request: Request) -> Response:
+    """HTMX polling target for the startup-preparing page.
+
+    Returns the partial banner while downloads are in flight; once
+    ready, emits an `HX-Refresh` header so the browser reloads into
+    the real planner page without the client needing JS glue.
+    """
+    readiness = getattr(request.app.state, "charts_ready", None)
+    if readiness is not None and readiness.status == "ready":
+        resp = HTMLResponse("", status_code=200)
+        resp.headers["HX-Refresh"] = "true"
+        return resp
+    return templates.TemplateResponse(
+        request,
+        "_preparing.html",
+        _readiness_ctx(readiness, is_partial=True),
     )
 
 

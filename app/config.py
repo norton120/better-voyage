@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     # Charts (plan/15-charts-bathymetry)
     charts_dir: Path = Field(default=Path("./data/charts"))
     gebco_path: Path | None = None
+    gebco_download_url: str = (
+        "https://www.bodc.ac.uk/data/open_download/gebco/gebco_2024_sub_ice_topo/zip/"
+    )
+    gebco_auto_download: bool = True
     shallow_cutoff_m: float = 2.0
     charts_max_age_days: int = 90
     navaid_bbox_pad_nm: float = 2.0
@@ -56,9 +60,31 @@ class Settings(BaseSettings):
     tide_interpolation_radius_nm: float = 25.0
     noaa_enc_catalog_url: str = "https://charts.noaa.gov/ENCs/ENCProdCat.xml"
     overpass_base_url: str = "https://overpass-api.de/api/interpreter"
+    # Extra Overpass mirrors tried in order if the primary returns 5xx.
+    # Comma-separated list — shipping multiple mirrors because the
+    # public `overpass-api.de` host returns 504 under load on multi-
+    # degree bboxes (see plan/15 §Chart fetching failure modes).
+    overpass_fallback_urls: str = (
+        "https://overpass.kumi.systems/api/interpreter,"
+        "https://overpass.openstreetmap.ru/api/interpreter,"
+        "https://lz4.overpass-api.de/api/interpreter"
+    )
+    overpass_timeout_s: float = 240.0
     # "real" = download + preprocess per plan/15; "null" = development
     # stub that treats the planet as navigable water (tests + offline).
     chart_store_mode: Literal["real", "null"] = "real"
+
+    def effective_gebco_path(self) -> Path:
+        """Resolve the GEBCO netCDF path, defaulting under `charts_dir`.
+
+        Operators can pre-stage the 8 GB file and point `BV_GEBCO_PATH`
+        at it. When unset, we fall back to `charts_dir/gebco/...` so the
+        startup auto-download has a stable target that survives process
+        restarts.
+        """
+        if self.gebco_path is not None:
+            return self.gebco_path
+        return self.charts_dir / "gebco" / "GEBCO_2024_sub_ice_topo.nc"
 
     # Observability — see plan/14-observability.md
     otel_service_name: str = "better-voyage"

@@ -38,37 +38,23 @@ def _catalog_xml() -> bytes:
     - US4FLAX : (25.0, -81.0, 26.0, -80.0)   far south
     - US4NYNY : (40.5, -74.5, 41.0, -74.0)   north of bbox
     """
+    def cell(name: str, vertices: list[tuple[float, float]]) -> bytes:
+        verts = b"".join(
+            f"<vertex><lat>{lat}</lat><long>{lon}</long></vertex>".encode()
+            for lat, lon in vertices
+        )
+        return (
+            b"<cell><name>" + name.encode() + b"</name>"
+            b"<cov><panel>" + verts + b"</panel></cov></cell>"
+        )
+
     return (
         b"<?xml version='1.0' encoding='UTF-8'?>"
-        b"<catalog>"
-        b"<cell>"
-        b"<name>US4CHES</name>"
-        b"<cov><panel>"
-        b"<vertex>38.0,-76.5</vertex>"
-        b"<vertex>38.0,-76.0</vertex>"
-        b"<vertex>38.8,-76.0</vertex>"
-        b"<vertex>38.8,-76.5</vertex>"
-        b"</panel></cov>"
-        b"</cell>"
-        b"<cell>"
-        b"<name>US4FLAX</name>"
-        b"<cov><panel>"
-        b"<vertex>25.0,-81.0</vertex>"
-        b"<vertex>25.0,-80.0</vertex>"
-        b"<vertex>26.0,-80.0</vertex>"
-        b"<vertex>26.0,-81.0</vertex>"
-        b"</panel></cov>"
-        b"</cell>"
-        b"<cell>"
-        b"<name>US4NYNY</name>"
-        b"<cov><panel>"
-        b"<vertex>40.5,-74.5</vertex>"
-        b"<vertex>40.5,-74.0</vertex>"
-        b"<vertex>41.0,-74.0</vertex>"
-        b"<vertex>41.0,-74.5</vertex>"
-        b"</panel></cov>"
-        b"</cell>"
-        b"</catalog>"
+        b"<EncProductCatalog>"
+        + cell("US4CHES", [(38.0, -76.5), (38.0, -76.0), (38.8, -76.0), (38.8, -76.5)])
+        + cell("US4FLAX", [(25.0, -81.0), (25.0, -80.0), (26.0, -80.0), (26.0, -81.0)])
+        + cell("US4NYNY", [(40.5, -74.5), (40.5, -74.0), (41.0, -74.0), (41.0, -74.5)])
+        + b"</EncProductCatalog>"
     )
 
 
@@ -243,20 +229,48 @@ async def test_overpass_cache_hit_skips_second_http(
 async def test_overpass_5xx_raises_charts_fetch_error(
     tmp_path: Path, httpx_mock
 ) -> None:
-    # tenacity retries http_retries=3 times, so prime three 500s.
-    for _ in range(3):
-        httpx_mock.add_response(
-            url="https://overpass-api.de/api/interpreter",
-            method="POST",
-            status_code=500,
-            content=b"boom",
-        )
+    # All four mirrors (primary + 3 fallbacks from default config) return
+    # 500 across tenacity's 3 retries = 12 attempts total before we give up.
+    mirrors = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass.openstreetmap.ru/api/interpreter",
+        "https://lz4.overpass-api.de/api/interpreter",
+    ]
+    for url in mirrors:
+        for _ in range(3):
+            httpx_mock.add_response(
+                url=url, method="POST", status_code=500, content=b"boom",
+            )
 
     with pytest.raises(ChartsFetchError):
         await fetch_osm_extract(TEST_BBOX, tmp_path)
 
-    # All three attempts were made.
-    assert len(httpx_mock.get_requests()) == 3
+    assert len(httpx_mock.get_requests()) == 3 * len(mirrors)
+
+
+@pytest.mark.asyncio
+async def test_overpass_falls_back_to_mirror_on_primary_5xx(
+    tmp_path: Path, httpx_mock
+) -> None:
+    """When the primary Overpass host 504s, the next mirror takes over."""
+    # Primary: 3 failing attempts.
+    for _ in range(3):
+        httpx_mock.add_response(
+            url="https://overpass-api.de/api/interpreter",
+            method="POST", status_code=504, content=b"timeout",
+        )
+    # First fallback mirror: success on the first try.
+    httpx_mock.add_response(
+        url="https://overpass.kumi.systems/api/interpreter",
+        method="POST", status_code=200,
+        content=b"<?xml version='1.0' encoding='UTF-8'?><osm/>",
+    )
+
+    result = await fetch_osm_extract(TEST_BBOX, tmp_path)
+    assert result is not None
+    # 3 failures on primary + 1 success on mirror = 4 requests.
+    assert len(httpx_mock.get_requests()) == 4
 
 
 # --------------------------------------------------------------------------- #

@@ -20,28 +20,42 @@ Surfaces:
 ### Chart ingest prerequisites
 
 `POST /voyages` is blocking on the real ChartStore (plan/15) —
-`BV_CHART_STORE_MODE=real` is the default. Before the first voyage:
+`BV_CHART_STORE_MODE=real` is the default.
 
-1. **Download GEBCO** (once, ~8 GB) from
-   <https://www.gebco.net/data_and_products/gridded_bathymetry_data/>.
-   Pick the netCDF variant; stash the `.nc` somewhere readable by the
-   service. We do not redistribute it.
-2. **Point the service at it**:
-   ```bash
-   export BV_GEBCO_PATH=/abs/path/to/gebco_2024_sub_ice_topo.nc
-   export BV_CHARTS_DIR=./data/charts
-   ```
-   In Docker, add both to the `environment:` block for the `app`
-   service and mount the netCDF into the container.
-3. **Pre-seed chart cells** for your cruising area (recommended — the
-   first voyage otherwise pays the full NOAA ENC + Overpass download
-   on-demand):
-   ```bash
-   uv run python -m app.charts fetch --region chesapeake
-   # or: --bbox lat_min,lon_min,lat_max,lon_max
-   ```
-   Exit code 0 = coverage sealed, 2 = `CHARTS_NOT_AVAILABLE`, 3 =
-   `CHARTS_FETCH_FAILED`, 64 = bad CLI usage.
+**GEBCO bathymetry** is auto-downloaded on first startup to
+`$BV_CHARTS_DIR/gebco/GEBCO_2024_sub_ice_topo.nc` (~8 GB, ~10–20 min
+on a fast connection). The UI renders a "preparing charts" banner
+while the download runs and reloads itself into the planner page once
+complete. Subsequent starts are instant (the file is reused). To
+override the default behavior:
+
+- **Pre-stage the file** and point the service at it — skip the
+  auto-download entirely:
+  ```bash
+  export BV_GEBCO_PATH=/abs/path/to/gebco_2024_sub_ice_topo.nc
+  ```
+  In Docker, mount the netCDF and set the env var in the `app`
+  service; the auto-download is skipped when the path exists.
+- **Disable auto-download** (air-gapped deploys):
+  ```bash
+  export BV_GEBCO_AUTO_DOWNLOAD=false
+  # + pre-stage the file manually, see above
+  ```
+- **Point at a different source** (e.g. a GEBCO mirror or a newer
+  yearly grid):
+  ```bash
+  export BV_GEBCO_DOWNLOAD_URL=https://...
+  ```
+
+**Pre-seed chart cells** for your cruising area (optional — the
+first voyage otherwise pays the full NOAA ENC + Overpass download
+on-demand):
+```bash
+uv run python -m app.charts fetch --region chesapeake
+# or: --bbox lat_min,lon_min,lat_max,lon_max
+```
+Exit code 0 = coverage sealed, 2 = `CHARTS_NOT_AVAILABLE`, 3 =
+`CHARTS_FETCH_FAILED`, 64 = bad CLI usage.
 
 For API-exploration only (no real routing), set
 `BV_CHART_STORE_MODE=null` — the planner uses a stub that treats the
@@ -64,7 +78,9 @@ operators usually tune:
 | `BV_OTEL_ENDPOINT`        | `http://localhost:4318`                          | OTLP HTTP receiver.                                               |
 | `BV_LOG_LEVEL`            | `INFO` (`DEBUG` in compose)                      | Structlog root level.                                             |
 | `BV_CHART_STORE_MODE`     | `real`                                           | `null` for API smoke-tests without chart ingest (no real routing).|
-| `BV_GEBCO_PATH`           | unset                                            | Absolute path to the GEBCO netCDF. Required when mode = `real`.   |
+| `BV_GEBCO_PATH`           | unset                                            | Override path to the GEBCO netCDF. Defaults to `$BV_CHARTS_DIR/gebco/GEBCO_2024_sub_ice_topo.nc` (auto-downloaded on first start). |
+| `BV_GEBCO_DOWNLOAD_URL`   | BODC mirror                                      | Source URL for the first-boot GEBCO download; change when GEBCO publishes a new yearly grid. |
+| `BV_GEBCO_AUTO_DOWNLOAD`  | `true`                                           | `false` in air-gapped deploys — then pre-stage the file at `BV_GEBCO_PATH` yourself.         |
 | `BV_CHARTS_DIR`           | `./data/charts`                                  | ENC / OSM cache root; pre-seed with `python -m app.charts fetch`. |
 | `BV_CHARTS_MAX_AGE_DAYS`  | `90`                                             | Refresh cadence for cached ENC cells and OSM extracts.            |
 | `BV_SHALLOW_CUTOFF_M`     | `2.0`                                            | DEPARE polygons below this depth are treated as shallow hazards.  |
@@ -119,7 +135,7 @@ Symptom → where to look:
 | Voyage `failed` with `FORECAST_UNAVAILABLE` | Prefetch raised with no cache to fall back on. Check upstream reachability; look at `bv.cache.lookups{result="error"}`. |
 | Voyage `failed` with `WORKER_RESTARTED`   | Process restart during a live job. The crash-recovery sweep (`jobs.sweep_crashed`) marks the row; rerun to replan.  |
 | Voyage stuck in `forecast_prefetching`    | Open-Meteo slow or misbehaving. Look at the `forecast.prefetch` span for offending `(lat, lon)` calls.               |
-| Voyage `failed` with `CHARTS_NOT_AVAILABLE` | ENC + OSM can't cover the bbox, or no GEBCO configured. Check `BV_GEBCO_PATH`; pre-seed with `python -m app.charts fetch --bbox ...`. |
+| Voyage `failed` with `CHARTS_NOT_AVAILABLE` | ENC + OSM can't cover the bbox, or GEBCO isn't staged yet. Confirm the UI preparing-banner cleared (or that `BV_GEBCO_PATH` exists); pre-seed ENC with `python -m app.charts fetch --bbox ...`. |
 | Voyage `failed` with `CHARTS_FETCH_FAILED`  | Transient network error hitting NOAA ENC catalog / Overpass. Retry; if persistent, inspect the `charts.fetch` span for the offending URL. |
 | Voyage stuck in `charts_fetching`         | First-run fetch of a big region. Typical latency 30 s – few minutes per ~1°×1° region. Pre-seed via CLI to eliminate the wait. |
 | Voyage stuck in `routing`                 | `bv.router.wallclock_seconds`, `bv.router.steps` — often paired with `bv.router.outcomes{outcome="timeout"}` spikes. |

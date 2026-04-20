@@ -54,17 +54,28 @@ uv run mypy app
 ## Chart ingest setup
 
 `better-voyage` refuses to plan without real chart data (plan/15 —
-"real charts or no route"). Before the first voyage:
+"real charts or no route"). The first time the app starts, it
+auto-downloads the global GEBCO bathymetry grid (~8 GB) to
+`$BV_CHARTS_DIR/gebco/GEBCO_2024_sub_ice_topo.nc` and the UI shows a
+"preparing charts" page until the download finishes. No env vars are
+required for a basic dev setup.
 
-1. Download GEBCO (~8 GB netCDF) from
-   <https://www.gebco.net/data_and_products/gridded_bathymetry_data/>.
-2. Point the service at it:
+Optional overrides:
+
+1. Pre-stage GEBCO yourself (e.g. download once on a fast connection,
+   ship the file around) and point the service at it:
    ```bash
    export BV_GEBCO_PATH=/abs/path/to/gebco_2024_sub_ice_topo.nc
-   export BV_CHARTS_DIR=./data/charts
    ```
-3. Pre-seed a cruising area (optional; first voyage otherwise pays the
-   full NOAA ENC + Overpass download on-demand):
+   If `BV_GEBCO_PATH` points at an existing file the auto-download is
+   skipped.
+2. Disable auto-download entirely (e.g. air-gapped ops):
+   ```bash
+   export BV_GEBCO_AUTO_DOWNLOAD=false
+   ```
+   Voyages fail with `CHARTS_NOT_AVAILABLE` until GEBCO is staged.
+3. Pre-seed a cruising area (first voyage otherwise pays the full NOAA
+   ENC + Overpass download on-demand):
    ```bash
    uv run python -m app.charts fetch --region chesapeake
    # or: --bbox lat_min,lon_min,lat_max,lon_max

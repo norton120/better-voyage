@@ -112,11 +112,28 @@ class RouterError(Exception):
 
 
 def heading_fan(
-    course_to_dest: float, coarse_step: int = 10, fine_step: int = 3, fine_radius: int = 20
+    course_to_dest: float,
+    coarse_step: int = 10,
+    fine_step: int = 3,
+    fine_radius: int = 20,
 ) -> list[float]:
     fine = {(course_to_dest + d) % 360.0 for d in range(-fine_radius, fine_radius + 1, fine_step)}
     coarse = {float(h) for h in range(0, 360, coarse_step)}
     return sorted(fine | coarse)
+
+
+def heading_fan_fine(course_to_dest: float) -> list[float]:
+    """Fan for near-shore stepping.
+
+    Coarse every 10° (same as default), fine every 2° within ±30° of the
+    course (vs. 3° within ±20° default). Net ~55 headings — only
+    modestly denser than the default 50. The graduated step size is
+    already ~6x finer (10-min vs 60-min), so path granularity comes
+    from short steps, not from more headings per step. Over-densifying
+    the fan here turns each near-shore step into a ~10-second compute
+    spike under real ChartStore queries.
+    """
+    return heading_fan(course_to_dest, coarse_step=10, fine_step=2, fine_radius=30)
 
 
 # --- objective costs --------------------------------------------------------
@@ -212,11 +229,26 @@ def plan_candidate(
     boat: BoatLimits,
     objective: Objective = "fastest",
     step_minutes: int = 60,
+    fine_step_minutes: int = 10,
+    shore_threshold_nm: float = 3.0,
     max_steps: int = 168,
     arrival_tolerance_nm: float = 0.5,
 ) -> RouteResult:
-    step_h = step_minutes / 60.0
-    step_delta = timedelta(minutes=step_minutes)
+    """Plan a single candidate departure.
+
+    Graduated step size (plan/04 §Step schedule): when any point on
+    the current frontier is within `shore_threshold_nm` of land, or
+    within `shore_threshold_nm` of the destination, use
+    `fine_step_minutes` — small enough to thread narrow channels
+    without the straight-line segment between isochrone points
+    jumping over land. Otherwise use the coarse `step_minutes`.
+    The fine mode also swaps to a denser heading fan for better
+    channel coverage.
+    """
+    coarse_delta = timedelta(minutes=step_minutes)
+    fine_delta = timedelta(minutes=fine_step_minutes)
+    coarse_h = step_minutes / 60.0
+    fine_h = fine_step_minutes / 60.0
 
     origin_point = IsochronePoint(
         lat=origin[0], lon=origin[1], t=depart_at, parent=None,
@@ -226,12 +258,65 @@ def plan_candidate(
     no_coverage_frontier_count = 0
     t0 = time.monotonic()
     outcome_labels = {"objective": objective}
+    current_t = depart_at
+
+    # Pre-compute once whether each endpoint is itself near shore, so we
+    # know whether we need fine stepping on the exit / approach.
+    origin_near_shore = (
+        charts.distance_to_land_nm(origin[0], origin[1]) <= shore_threshold_nm
+    )
+    destination_near_shore = (
+        charts.distance_to_land_nm(destination[0], destination[1])
+        <= shore_threshold_nm
+    )
+    # When exiting a cove, stay in fine mode until we're clear of the
+    # origin's near-shore zone by this margin. `shore_threshold_nm * 2`
+    # gives the boat room to get into genuinely open water before
+    # switching to 60-min hops.
+    exit_clear_nm = shore_threshold_nm * 2.0
+
+    def _frontier_near_shore(pts: list[IsochronePoint]) -> bool:
+        """Fine mode trigger evaluated against the lead edge only.
+
+        - Looking at *any* frontier point keeps fine mode stuck on,
+          since the wide fan always has an edge point within a few nm
+          of some Chesapeake shoreline.
+        - Looking at the *median* fails for the same reason in narrow
+          bays — the typical path is always within a few nm of some
+          coast.
+
+        What actually matters: where is the boat's lead edge relative
+        to the two shore-adjacent places that need careful stepping —
+        the origin cove and the destination harbor? Everywhere in
+        between, 60-min steps are fine even if the course grazes land.
+        """
+        if not pts:
+            return False
+        lead = min(
+            pts,
+            key=lambda p: distance_nm(
+                p.lat, p.lon, destination[0], destination[1]
+            ),
+        )
+        approach = destination_near_shore and distance_nm(
+            lead.lat, lead.lon, destination[0], destination[1]
+        ) <= shore_threshold_nm
+        exit_ = origin_near_shore and distance_nm(
+            lead.lat, lead.lon, origin[0], origin[1]
+        ) <= exit_clear_nm
+        return approach or exit_
 
     for step in range(1, max_steps + 1):
-        t = depart_at + step * step_delta
+        frontier_pts = isochrones[-1]
+        fine_mode = _frontier_near_shore(frontier_pts)
+        step_h = fine_h if fine_mode else coarse_h
+        step_delta = fine_delta if fine_mode else coarse_delta
+        current_t = current_t + step_delta
+        t = current_t
         frontier: list[IsochronePoint] = []
+        fan_fn = heading_fan_fine if fine_mode else heading_fan
 
-        for pt in isochrones[-1]:
+        for pt in frontier_pts:
             env = forecast.at(pt.lat, pt.lon, t)
             if env is None:
                 continue
@@ -239,7 +324,7 @@ def plan_candidate(
                 continue
 
             course_to_dest = bearing_deg(pt.lat, pt.lon, destination[0], destination[1])
-            for h in heading_fan(course_to_dest):
+            for h in fan_fn(course_to_dest):
                 twa = relative_wind_angle(h, env.wind_dir_deg)
                 bsp = polar.bsp(twa, env.wind_speed_kts)
                 if bsp < boat.min_bsp_kts:
@@ -283,7 +368,18 @@ def plan_candidate(
 
         pruned = sector_prune(frontier, destination, objective=objective)
         if not pruned:
-            pruned = frontier  # fall back — all were behind the centroid
+            # Sector prune rejects every point — typical when forced
+            # to back out of a cove (all viable moves face away from
+            # destination). Take the frontier but cap it at n_sectors
+            # by proximity to destination, otherwise the frontier
+            # balloons by ~|fan| per step and plan_candidate hangs.
+            n_cap = 72
+            pruned = sorted(
+                frontier,
+                key=lambda p: distance_nm(
+                    p.lat, p.lon, destination[0], destination[1]
+                ),
+            )[:n_cap]
         isochrones.append(pruned)
 
         for p in pruned:

@@ -85,12 +85,11 @@ async def _run_fetch(resolved: CliArgs) -> int:
         )
         return 64
 
-    store = ChartStore(
-        base_dir=settings.charts_dir, gebco_path=settings.gebco_path
-    )
+    gebco_path = settings.effective_gebco_path()
+    store = ChartStore(base_dir=settings.charts_dir, gebco_path=gebco_path)
     print(
         f"charts.fetch starting {resolved.label} "
-        f"charts_dir={settings.charts_dir} gebco={settings.gebco_path}",
+        f"charts_dir={settings.charts_dir} gebco={gebco_path}",
         file=sys.stderr,
     )
     try:

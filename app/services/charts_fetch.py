@@ -31,6 +31,7 @@ import hashlib
 import io
 import time
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -185,20 +186,23 @@ class _CatalogCell:
 def _parse_catalog(xml_bytes: bytes) -> list[_CatalogCell]:
     """Parse NOAA's ENCProdCat.xml into a list of (name, bbox) rows.
 
-    The catalog shape per plan/15 §Data sources / NOAA ENC:
+    The current catalog shape (schema version 1.0, verified 2026-04):
 
-        <catalog>
+        <EncProductCatalog>
           <cell>
             <name>US4MD01M</name>
             <cov>
               <panel>
-                <vertex>lat,lon</vertex>
+                <vertex>
+                  <lat>38.12</lat>
+                  <long>-76.34</long>
+                </vertex>
                 ...
               </panel>
             </cov>
           </cell>
           ...
-        </catalog>
+        </EncProductCatalog>
 
     A cell's bbox is the axis-aligned envelope of all panel vertices.
     """
@@ -216,13 +220,13 @@ def _parse_catalog(xml_bytes: bytes) -> list[_CatalogCell]:
         lats: list[float] = []
         lons: list[float] = []
         for vertex in cell_el.iter("vertex"):
-            txt = (vertex.text or "").strip()
-            if not txt or "," not in txt:
+            lat_el = vertex.find("lat")
+            lon_el = vertex.find("long")
+            if lat_el is None or lon_el is None:
                 continue
-            lat_s, lon_s = txt.split(",", 1)
             try:
-                lats.append(float(lat_s))
-                lons.append(float(lon_s))
+                lats.append(float((lat_el.text or "").strip()))
+                lons.append(float((lon_el.text or "").strip()))
             except ValueError:
                 continue
         if not lats or not lons:
@@ -446,16 +450,20 @@ async def fetch_enc_cells(
 
 
 def _overpass_query(bbox: Bbox) -> str:
-    """The exact query documented in plan/15 §Chart fetching."""
+    """The exact query documented in plan/15 §Chart fetching.
+
+    Overpass QL requires keys containing a colon (`seamark:type`) to be
+    double-quoted; unquoted produces a `400 parse error`.
+    """
     lat_min, lon_min, lat_max, lon_max = bbox
     bbox_str = f"{lat_min},{lon_min},{lat_max},{lon_max}"
     return (
         "[out:xml][timeout:180];\n"
         "(\n"
         f"  way[natural=coastline]({bbox_str});\n"
-        f"  node[seamark:type]({bbox_str});\n"
-        f"  way[seamark:type]({bbox_str});\n"
-        f"  relation[seamark:type]({bbox_str});\n"
+        f'  node["seamark:type"]({bbox_str});\n'
+        f'  way["seamark:type"]({bbox_str});\n'
+        f'  relation["seamark:type"]({bbox_str});\n'
         ");\n"
         "(._;>;);\n"
         "out;\n"
@@ -494,9 +502,17 @@ async def fetch_osm_extract(
             bytes_downloaded=0,
         )
 
-    url = settings.overpass_base_url
+    urls = [settings.overpass_base_url]
+    urls.extend(
+        u.strip()
+        for u in (settings.overpass_fallback_urls or "").split(",")
+        if u.strip() and u.strip() not in urls
+    )
     query = _overpass_query(bbox)
     bbox_attr = ",".join(f"{v:.6f}" for v in bbox)
+    overpass_timeout = httpx.Timeout(
+        settings.overpass_timeout_s, connect=30.0
+    )
     start = time.monotonic()
 
     owned = client is None
@@ -510,23 +526,46 @@ async def fetch_osm_extract(
                 "charts.extract_id": bbox_id,
             },
         ) as span:
-            log.info(
-                "charts.fetch.start",
-                source="osm",
-                extract_id=bbox_id,
-                url=url,
-            )
-            try:
-                async for attempt in _retry_policy():
-                    with attempt:
-                        resp = await http.post(url, data={"data": query})
-                        resp.raise_for_status()
-                        payload = resp.content
-            except Exception as exc:
-                raise ChartsFetchError(
-                    f"failed to fetch OSM extract for bbox {bbox_attr}: {exc}"
-                ) from exc
+            payload: bytes | None = None
+            last_exc: Exception | None = None
+            attempted_url: str | None = None
+            for url in urls:
+                attempted_url = url
+                log.info(
+                    "charts.fetch.start",
+                    source="osm",
+                    extract_id=bbox_id,
+                    url=url,
+                )
+                try:
+                    async for attempt in _retry_policy():
+                        with attempt:
+                            resp = await http.post(
+                                url,
+                                data={"data": query},
+                                timeout=overpass_timeout,
+                            )
+                            resp.raise_for_status()
+                            payload = resp.content
+                    # Succeeded — stop trying more mirrors.
+                    break
+                except Exception as exc:
+                    log.warning(
+                        "charts.fetch.mirror_failed",
+                        source="osm",
+                        url=url,
+                        error=str(exc)[:200],
+                    )
+                    last_exc = exc
+                    continue
 
+            if payload is None:
+                raise ChartsFetchError(
+                    f"failed to fetch OSM extract for bbox {bbox_attr} "
+                    f"after trying {len(urls)} mirror(s): {last_exc}"
+                ) from last_exc
+
+            span.set_attribute("charts.overpass_url", attempted_url or "")
             osm_path.write_bytes(payload)
             now = _utc_now()
             _write_fetched_at(meta_dir, now)
@@ -559,12 +598,13 @@ async def fetch_osm_extract(
 
 
 async def locate_gebco_tile(gebco_path: Path | None) -> Path:
-    """Validate that the operator-supplied GEBCO netCDF path exists.
+    """Validate that the GEBCO netCDF path exists.
 
-    GEBCO is ~8 GB — we never download it (plan/15 §Data sources). The
-    operator supplies the path via `BV_GEBCO_PATH`; this helper just
-    surfaces a clean `ChartsCoverageError` if it's missing so the
-    voyage job can terminate with `CHARTS_NOT_AVAILABLE`.
+    The startup hook (`ensure_gebco_available`) auto-downloads to
+    `Settings.effective_gebco_path()` on first boot; operators can
+    pre-stage or override via `BV_GEBCO_PATH`. This helper just
+    surfaces a clean `ChartsCoverageError` if the file isn't there
+    yet so the voyage job can terminate with `CHARTS_NOT_AVAILABLE`.
     """
     if gebco_path is None:
         raise ChartsCoverageError("no BV_GEBCO_PATH configured")
@@ -573,12 +613,203 @@ async def locate_gebco_tile(gebco_path: Path | None) -> Path:
     return gebco_path
 
 
+# ---- GEBCO auto-download --------------------------------------------------
+
+# GEBCO is published as a single global netCDF. The BODC mirror serves
+# it as a zip that expands to `GEBCO_<year>_sub_ice_topo.nc`. The URL
+# and filename change yearly; both are overridable via settings so we
+# don't need a code change when GEBCO publishes a new grid.
+_GEBCO_PROGRESS_STEP_BYTES = 500 * 1024 * 1024  # 500 MB log cadence
+
+
+ProgressCallback = Callable[[str, int, int], None]
+"""(phase, bytes_done, bytes_total) — `phase` is "downloading" or "extracting".
+
+`bytes_total` is 0 when the server didn't send a Content-Length."""
+
+
+async def ensure_gebco_available(
+    dest_path: Path,
+    url: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+    on_progress: ProgressCallback | None = None,
+) -> Path:
+    """Download the GEBCO netCDF to `dest_path` if it isn't already there.
+
+    Streams to a sibling `.part` file so a killed process never leaves
+    a half-written netCDF at `dest_path`. If the response body is a
+    zip, the first `.nc` member is extracted. Callers are expected to
+    hold a single-flight lock — this function does not coordinate with
+    concurrent downloads.
+
+    `on_progress` fires at ~every 32 MB during both download and zip
+    extraction; it's intentionally coarse so the UI state write doesn't
+    become a hot path.
+    """
+    if dest_path.exists():
+        return dest_path
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    part_path = dest_path.with_suffix(dest_path.suffix + ".part")
+
+    owned = client is None
+    http = client if client is not None else _owned_client()
+    # GEBCO is ~8 GB — the default 15 s timeout would abort every single
+    # read. Give the overall download 30 min and let TCP/tenacity handle
+    # transient stalls inside that window.
+    download_timeout = httpx.Timeout(30 * 60.0, connect=30.0)
+    start = time.monotonic()
+    ui_step = 32 * 1024 * 1024  # 32 MB — ~1% of a ~4 GB download
+    total_bytes = part_path.stat().st_size if part_path.exists() else 0
+    with _tracer.start_as_current_span(
+        "charts.fetch",
+        attributes={"charts.source": "gebco", "charts.url": url},
+    ) as span:
+        log.info(
+            "charts.fetch.start",
+            source="gebco", url=url, dest=str(dest_path),
+            resume_from=total_bytes,
+        )
+        try:
+            async for attempt in _retry_policy():
+                with attempt:
+                    # Re-check on every attempt: the previous try may have
+                    # appended more bytes before erroring out.
+                    resume_from = (
+                        part_path.stat().st_size if part_path.exists() else 0
+                    )
+                    headers = (
+                        {"Range": f"bytes={resume_from}-"}
+                        if resume_from > 0 else {}
+                    )
+                    async with http.stream(
+                        "GET", url, timeout=download_timeout, headers=headers
+                    ) as resp:
+                        # 416 = range already past end (file is complete but
+                        # we didn't notice); treat as success.
+                        if resp.status_code == 416:
+                            total_bytes = resume_from
+                            break
+                        # 200 means server ignored Range; restart from zero.
+                        if resume_from > 0 and resp.status_code == 200:
+                            log.warning(
+                                "charts.fetch.range_ignored",
+                                source="gebco", resume_from=resume_from,
+                            )
+                            resume_from = 0
+                            part_path.unlink(missing_ok=True)
+                        resp.raise_for_status()
+                        content_len = int(resp.headers.get("content-length", 0))
+                        expected = resume_from + content_len
+                        span.set_attribute("charts.content_length", expected)
+                        next_log = _GEBCO_PROGRESS_STEP_BYTES
+                        next_ui = ui_step
+                        total_bytes = resume_from
+                        if on_progress is not None:
+                            on_progress("downloading", total_bytes, expected)
+                        mode = "ab" if resume_from > 0 else "wb"
+                        with part_path.open(mode) as fh:
+                            async for chunk in resp.aiter_bytes(
+                                chunk_size=1024 * 1024
+                            ):
+                                fh.write(chunk)
+                                total_bytes += len(chunk)
+                                if total_bytes >= next_log:
+                                    log.info(
+                                        "charts.fetch.progress",
+                                        source="gebco",
+                                        bytes=total_bytes,
+                                        expected=expected or None,
+                                    )
+                                    next_log += _GEBCO_PROGRESS_STEP_BYTES
+                                if on_progress is not None and total_bytes >= next_ui:
+                                    on_progress(
+                                        "downloading", total_bytes, expected
+                                    )
+                                    next_ui += ui_step
+                        if on_progress is not None:
+                            on_progress("downloading", total_bytes, expected)
+        except Exception as exc:
+            # Keep `.part` on disk — a subsequent call will resume from
+            # where we left off via the Range header above.
+            raise ChartsFetchError(f"failed to fetch GEBCO: {exc}") from exc
+        finally:
+            if owned:
+                await http.aclose()
+
+        # Peek at the first bytes to decide zip vs raw netcdf.
+        with part_path.open("rb") as fh:
+            magic = fh.read(4)
+
+        if magic[:2] == b"PK":
+            # Zip: extract the first .nc into dest_path, then drop the zip.
+            try:
+                with zipfile.ZipFile(part_path) as zf:
+                    nc_members = [
+                        i for i in zf.infolist()
+                        if not i.is_dir() and i.filename.lower().endswith(".nc")
+                    ]
+                    if not nc_members:
+                        raise ChartsFetchError(
+                            "GEBCO zip contained no .nc member"
+                        )
+                    member = nc_members[0]
+                    member_size = member.file_size
+                    # Extract streaming to avoid loading ~8 GB into RAM.
+                    tmp_nc = part_path.with_suffix(".nc.part")
+                    tmp_nc.unlink(missing_ok=True)
+                    extracted = 0
+                    next_ui = ui_step
+                    if on_progress is not None:
+                        on_progress("extracting", 0, member_size)
+                    with zf.open(member) as src, tmp_nc.open("wb") as dst:
+                        while True:
+                            buf = src.read(1024 * 1024)
+                            if not buf:
+                                break
+                            dst.write(buf)
+                            extracted += len(buf)
+                            if on_progress is not None and extracted >= next_ui:
+                                on_progress(
+                                    "extracting", extracted, member_size
+                                )
+                                next_ui += ui_step
+                    if on_progress is not None:
+                        on_progress("extracting", extracted, member_size)
+                    part_path.unlink(missing_ok=True)
+                    tmp_nc.replace(dest_path)
+            except zipfile.BadZipFile as exc:
+                part_path.unlink(missing_ok=True)
+                raise ChartsFetchError(f"GEBCO zip is corrupt: {exc}") from exc
+        else:
+            # Assume raw netCDF. netCDF4 magic = b"\x89HDF"; netCDF3 = b"CDF\x01".
+            part_path.replace(dest_path)
+
+        elapsed = time.monotonic() - start
+        size = dest_path.stat().st_size
+        span.set_attribute("charts.bytes_downloaded", total_bytes)
+        span.set_attribute("charts.wallclock_seconds", elapsed)
+        _fetch_bytes.add(total_bytes, {"source": "gebco"})
+        _fetch_seconds.record(elapsed, {"source": "gebco"})
+        log.info(
+            "charts.fetch.done",
+            source="gebco",
+            bytes=total_bytes,
+            final_bytes=size,
+            wallclock_s=elapsed,
+            dest=str(dest_path),
+        )
+        return dest_path
+
+
 __all__ = [
     "Bbox",
     "ChartsCoverageError",
     "ChartsFetchError",
     "EncCellFetchResult",
     "OsmExtractFetchResult",
+    "ensure_gebco_available",
     "fetch_enc_cells",
     "fetch_osm_extract",
     "locate_gebco_tile",

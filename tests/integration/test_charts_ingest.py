@@ -89,26 +89,26 @@ def seeded_enc_cell(charts_dir: Path) -> EncCellFetchResult:
                 "type": "Feature",
                 "geometry": {
                     "type": "Point",
-                    "coordinates": [-76.48, 38.97],
+                    "coordinates": [-76.42, 38.70],
                 },
                 "properties": {
                     "bv:layer": "navaid",
                     "sym": "Buoy, Red",
                     "name": "R '2'",
-                    "desc": "Red lateral buoy; approach to Annapolis.",
+                    "desc": "Red lateral buoy; mid-route waypoint.",
                 },
             },
             {
                 "type": "Feature",
                 "geometry": {
                     "type": "Point",
-                    "coordinates": [-76.40, 38.95],
+                    "coordinates": [-76.32, 38.88],
                 },
                 "properties": {
                     "bv:layer": "navaid",
                     "sym": "Beacon, Green",
                     "name": "G '1'",
-                    "desc": "Green beacon",
+                    "desc": "Green beacon; destination approach.",
                 },
             },
         ],
