@@ -174,16 +174,31 @@ def sector_prune(
     destination: tuple[float, float],
     n_sectors: int = 72,
     objective: str = "fastest",
+    min_frontier_floor: int | None = None,
 ) -> list[IsochronePoint]:
+    """Keep one best point per angular sector around the centroid→destination axis.
+
+    `half_width = 120°` (±120° of the axis) rather than 90°. The tighter
+    90° cutoff rejected points making oblique axial progress — common in
+    narrow bays, where the valid fan is frequently squeezed against a
+    single shore — and let the frontier collapse a handful of steps in.
+
+    `min_frontier_floor` guarantees the returned frontier isn't smaller
+    than `min(floor, |points|)`. When sectoring discards too much (for
+    example when almost every direction is blocked by land and only a
+    thin wedge of propagations survived), we top up with the remaining
+    points nearest to the destination. Defaults to `min(20, n_sectors)`.
+    """
     if not points:
         return []
+    floor = min_frontier_floor if min_frontier_floor is not None else min(20, n_sectors)
     mean_lat = sum(p.lat for p in points) / len(points)
     mean_lon = sum(p.lon for p in points) / len(points)
     axis = bearing_deg(mean_lat, mean_lon, destination[0], destination[1])
     weight = _OBJECTIVE_WEIGHT.get(objective, 0.0)
 
     buckets: dict[int, tuple[float, IsochronePoint]] = {}
-    half_width = 90.0
+    half_width = 120.0
     sector_width = 2 * half_width / n_sectors
 
     for p in points:
@@ -200,7 +215,16 @@ def sector_prune(
         cur = buckets.get(s)
         if cur is None or metric > cur[0]:
             buckets[s] = (metric, p)
-    return [p for _, p in buckets.values()]
+    kept = [p for _, p in buckets.values()]
+
+    if len(kept) < floor and len(points) > len(kept):
+        kept_ids = {id(p) for p in kept}
+        extras = sorted(
+            (p for p in points if id(p) not in kept_ids),
+            key=lambda p: distance_nm(p.lat, p.lon, destination[0], destination[1]),
+        )
+        kept.extend(extras[: floor - len(kept)])
+    return kept
 
 
 # --- motion step ------------------------------------------------------------
@@ -367,19 +391,6 @@ def plan_candidate(
         no_coverage_frontier_count = 0
 
         pruned = sector_prune(frontier, destination, objective=objective)
-        if not pruned:
-            # Sector prune rejects every point — typical when forced
-            # to back out of a cove (all viable moves face away from
-            # destination). Take the frontier but cap it at n_sectors
-            # by proximity to destination, otherwise the frontier
-            # balloons by ~|fan| per step and plan_candidate hangs.
-            n_cap = 72
-            pruned = sorted(
-                frontier,
-                key=lambda p: distance_nm(
-                    p.lat, p.lon, destination[0], destination[1]
-                ),
-            )[:n_cap]
         isochrones.append(pruned)
 
         for p in pruned:
