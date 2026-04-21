@@ -308,9 +308,14 @@ def test_sector_prune_floors_collapsing_frontier() -> None:
 
 
 def test_sector_prune_retains_obliquely_progressing_points() -> None:
-    """A point at ~105° off axis still makes axial progress and must
-    survive. With the old 90° cutoff it would be discarded; the 120°
-    half-width introduced for issue/02 keeps it.
+    """A point at ~105° off axis — beyond the 90° bucketing window —
+    must still survive when the frontier is thin. The floor fallback
+    (nearest-to-destination backfill) is what preserves it.
+
+    Why: widening `half_width` itself to keep such points also lets
+    the frontier fan out laterally on every step and eventually
+    escape forecast coverage in open-water transits. The floor keeps
+    the oblique-progress case without that side-effect.
     """
     from app.services.router import IsochronePoint
     from app.services.geo import advance, bearing_deg
@@ -320,8 +325,6 @@ def test_sector_prune_retains_obliquely_progressing_points() -> None:
     destination = (38.20, -76.30)
     axis = bearing_deg(centroid[0], centroid[1], destination[0], destination[1])
 
-    # Two anchor points so the mean lands at `centroid`, then one
-    # oblique point sitting ~105° off the axis.
     oblique_lat, oblique_lon = advance(centroid[0], centroid[1], (axis + 105) % 360, 2.0)
     anchor_lat = 2 * centroid[0] - oblique_lat
     anchor_lon = 2 * centroid[1] - oblique_lon
@@ -330,7 +333,7 @@ def test_sector_prune_retains_obliquely_progressing_points() -> None:
         IsochronePoint(lat=anchor_lat, lon=anchor_lon, t=depart),
     ]
 
-    pruned = sector_prune(pts, destination, min_frontier_floor=0)
+    pruned = sector_prune(pts, destination)  # default floor backfills
     assert any(
         p.lat == oblique_lat and p.lon == oblique_lon for p in pruned
-    ), "oblique-progress point dropped — half_width likely regressed below ~105°"
+    ), "oblique-progress point dropped — floor backfill regressed"

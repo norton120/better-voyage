@@ -178,16 +178,18 @@ def sector_prune(
 ) -> list[IsochronePoint]:
     """Keep one best point per angular sector around the centroid→destination axis.
 
-    `half_width = 120°` (±120° of the axis) rather than 90°. The tighter
-    90° cutoff rejected points making oblique axial progress — common in
-    narrow bays, where the valid fan is frequently squeezed against a
-    single shore — and let the frontier collapse a handful of steps in.
+    `half_width = 90°` — points making negative axial progress (bearing
+    more than 90° off the axis) are rejected before bucketing. A wider
+    acceptance window lets the frontier fan out north/south each step
+    and eventually escape the forecast bbox in open-water transits.
 
     `min_frontier_floor` guarantees the returned frontier isn't smaller
-    than `min(floor, |points|)`. When sectoring discards too much (for
-    example when almost every direction is blocked by land and only a
-    thin wedge of propagations survived), we top up with the remaining
-    points nearest to the destination. Defaults to `min(20, n_sectors)`.
+    than `min(floor, |points|)` — when sectoring discards too much
+    (narrow channel where only a thin wedge of propagations survived,
+    or the 2-point edge case in the oblique-progress test), we top up
+    with the remaining points nearest to the destination. Defaults to
+    `min(20, n_sectors)`. This floor is what keeps obliquely-progressing
+    points around when bucketing would otherwise drop them.
     """
     if not points:
         return []
@@ -198,7 +200,7 @@ def sector_prune(
     weight = _OBJECTIVE_WEIGHT.get(objective, 0.0)
 
     buckets: dict[int, tuple[float, IsochronePoint]] = {}
-    half_width = 120.0
+    half_width = 90.0
     sector_width = 2 * half_width / n_sectors
 
     for p in points:
