@@ -14,7 +14,7 @@ from app.config import get_settings
 from app.db import engine, init_db
 from app.logging import configure_logging, get_logger
 from app.observability import setup_observability
-from app.routers import boat_profiles, health, pois, voyages
+from app.routers import boat_profiles, charts, health, pois, voyages
 from app.services.boat_profiles import ensure_default_seeded
 from app.services.cache_pruner import run_forever as run_cache_pruner
 from app.services.charts_fetch import ensure_gebco_available
@@ -150,6 +150,7 @@ app.include_router(health.router)
 app.include_router(voyages.router)
 app.include_router(boat_profiles.router)
 app.include_router(pois.router)
+app.include_router(charts.router)
 app.include_router(ui_router)
 
 _UI_STATIC = Path(__file__).parent / "ui" / "static"

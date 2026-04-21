@@ -33,11 +33,23 @@
   let navaidLayer = L.layerGroup().addTo(map);
 
   const hintEl = document.getElementById('pick-hint');
+  const warnEl = document.getElementById('pick-warning');
   const resetBtn = document.getElementById('reset-picks');
+  const submitBtn = document.getElementById('submit-btn');
   const originLat = document.getElementById('origin-lat');
   const originLon = document.getElementById('origin-lon');
   const destLat = document.getElementById('destination-lat');
   const destLon = document.getElementById('destination-lon');
+
+  // Per-endpoint result from /charts/point. `valid = false` means the
+  // server's land index classifies the pick as on-land and the submit
+  // button is disabled. `valid = null` means we don't have an answer
+  // yet (coverage not loaded, or request in flight) — submit stays
+  // enabled because the planner will do an authoritative check.
+  const pickStatus = { origin: null, destination: null };
+  const ORIGIN_COLOR = '#67b7ff';
+  const DEST_COLOR = '#ffb347';
+  const LAND_COLOR = '#ff6b6b';
 
   function setHint(text) { if (hintEl) hintEl.innerHTML = text; }
   function showReset(show) { if (resetBtn) resetBtn.hidden = !show; }
@@ -46,23 +58,111 @@
     if (originMarker) map.removeLayer(originMarker);
     originMarker = L.marker(latlng, {
       title: 'origin',
-      icon: coloredMarker('#67b7ff', 'A'),
+      icon: coloredMarker(ORIGIN_COLOR, 'A'),
     }).addTo(map);
     originLat.value = latlng.lat.toFixed(5);
     originLon.value = latlng.lng.toFixed(5);
     setHint("click map to set <b>destination</b>");
     showReset(true);
+    validatePick('origin', latlng);
   }
 
   function setDestination(latlng) {
     if (destMarker) map.removeLayer(destMarker);
     destMarker = L.marker(latlng, {
       title: 'destination',
-      icon: coloredMarker('#ffb347', 'B'),
+      icon: coloredMarker(DEST_COLOR, 'B'),
     }).addTo(map);
     destLat.value = latlng.lat.toFixed(5);
     destLon.value = latlng.lng.toFixed(5);
     setHint("<b>origin &amp; destination set</b> — fill the form and plan the voyage");
+    validatePick('destination', latlng);
+  }
+
+  async function validatePick(label, latlng) {
+    pickStatus[label] = null;
+    refreshPickGuard();
+    const url =
+      `/charts/point?lat=${encodeURIComponent(latlng.lat.toFixed(6))}` +
+      `&lon=${encodeURIComponent(latlng.lng.toFixed(6))}`;
+    let data;
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`http ${resp.status}`);
+      data = await resp.json();
+    } catch (err) {
+      // Transport / server fault — treat as unknown and let the
+      // planner be the authority. Do not block submit on network blips.
+      console.warn('charts/point failed', err);
+      pickStatus[label] = { valid: null, reason: 'network' };
+      refreshPickGuard();
+      return;
+    }
+    // If the user clicked a different spot while this was in flight,
+    // drop the stale response.
+    const marker = label === 'origin' ? originMarker : destMarker;
+    if (!marker) return;
+    const cur = marker.getLatLng();
+    if (cur.lat.toFixed(6) !== latlng.lat.toFixed(6) ||
+        cur.lng.toFixed(6) !== latlng.lng.toFixed(6)) return;
+
+    if (data.in_water === false) {
+      pickStatus[label] = {
+        valid: false,
+        reason: 'on_land',
+        distance_nm: data.distance_to_land_nm,
+      };
+      marker.setIcon(coloredMarker(
+        LAND_COLOR, label === 'origin' ? 'A' : 'B',
+      ));
+    } else if (data.coverage_loaded === false) {
+      pickStatus[label] = { valid: null, reason: 'loading' };
+    } else {
+      pickStatus[label] = {
+        valid: true,
+        depth_m: data.depth_m,
+        distance_nm: data.distance_to_land_nm,
+      };
+      // In case a previous pick at this label was red, restore color.
+      marker.setIcon(coloredMarker(
+        label === 'origin' ? ORIGIN_COLOR : DEST_COLOR,
+        label === 'origin' ? 'A' : 'B',
+      ));
+    }
+    refreshPickGuard();
+  }
+
+  function refreshPickGuard() {
+    const msgs = [];
+    for (const label of ['origin', 'destination']) {
+      const st = pickStatus[label];
+      if (st && st.valid === false) {
+        msgs.push(
+          `<strong>${label}</strong> is on land — ` +
+          `drag the marker or zoom in and click again.`
+        );
+      } else if (st && st.reason === 'loading') {
+        msgs.push(
+          `chart data still loading for <strong>${label}</strong> — ` +
+          `submit will verify before routing.`
+        );
+      }
+    }
+    const blocked = Object.values(pickStatus).some(
+      (s) => s && s.valid === false,
+    );
+    if (submitBtn) submitBtn.disabled = blocked;
+    if (warnEl) {
+      if (msgs.length) {
+        warnEl.innerHTML = msgs.join('<br>');
+        warnEl.hidden = false;
+        warnEl.classList.toggle('pick-warning-error', blocked);
+      } else {
+        warnEl.hidden = true;
+        warnEl.innerHTML = '';
+        warnEl.classList.remove('pick-warning-error');
+      }
+    }
   }
 
   function coloredMarker(color, label) {
@@ -83,6 +183,8 @@
     clearRoute();
     setHint("click map to set <b>origin</b>");
     showReset(false);
+    pickStatus.origin = pickStatus.destination = null;
+    refreshPickGuard();
   }
 
   if (resetBtn) resetBtn.addEventListener('click', resetPicks);

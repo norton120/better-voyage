@@ -87,6 +87,27 @@ main {
   cursor: pointer;
 }
 
+#pick-warning {
+  position: absolute;
+  top: 2.75rem;
+  left: 0.5rem;
+  right: 0.5rem;
+  z-index: 400;
+  max-width: 28rem;
+  background: rgba(15, 20, 25, 0.92);
+  border: 1px solid var(--accent-warm);
+  color: var(--ink);
+  padding: 0.4rem 0.6rem;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+#pick-warning.pick-warning-error {
+  border-color: var(--err);
+  color: var(--err);
+}
+
 #form-pane {
   overflow-y: auto;
   padding-right: 0.25rem;

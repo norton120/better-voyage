@@ -227,7 +227,32 @@ async def _stage_charts_fetching(state: PlanState) -> None:
             ) from exc
     state.charts_coverage = await store.coverage(bbox)
     await _write_coverage(state)
+    _validate_endpoints_in_water(state.req, store)
     await write_progress(state.voyage_id, "charts_fetching", 1.0)
+
+
+def _validate_endpoints_in_water(
+    req: VoyageRequest, store: _ChartStore | NullChartStore
+) -> None:
+    """Fail fast if origin or destination sits inside a land polygon.
+
+    Without this, an on-land pick would run through the rest of the
+    job — forecast prefetching plus routing of every candidate
+    departure — before the router reported `ROUTE_BLOCKED`. Checking
+    here (once charts are loaded) keeps the feedback loop tight and
+    names the specific endpoint the user should fix.
+    """
+    for label, coord in (
+        ("origin", (req.origin.lat, req.origin.lon)),
+        ("destination", (req.destination.lat, req.destination.lon)),
+    ):
+        dist_nm = store.distance_to_land_nm(*coord)
+        if dist_nm <= 0.0:
+            raise PlannerError(
+                "ENDPOINT_ON_LAND",
+                "charts_fetching",
+                f"{label} ({coord[0]:.5f}, {coord[1]:.5f}) is inside a land polygon",
+            )
 
 
 async def _stage_charts_preprocessing(state: PlanState) -> None:
