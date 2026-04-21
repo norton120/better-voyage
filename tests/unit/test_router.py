@@ -271,5 +271,69 @@ def test_sector_prune_keeps_one_per_sector() -> None:
         lon = -76.5 + 0.01 * ang / 40 + 0.1
         pts.append(IsochronePoint(lat=lat, lon=lon, t=depart))
     destination = (38.5, -75.0)
-    pruned = sector_prune(pts, destination, n_sectors=16)
+    pruned = sector_prune(pts, destination, n_sectors=16, min_frontier_floor=0)
     assert 1 <= len(pruned) <= 16
+
+
+def test_sector_prune_floors_collapsing_frontier() -> None:
+    """When sector bucketing leaves the frontier smaller than the floor,
+    supplement with remaining points nearest to destination. Reproduces
+    the issue/02 attrition: many valid propagations survive into only a
+    handful of buckets, and without a floor the frontier collapses
+    within a few more steps.
+    """
+    from app.services.router import IsochronePoint
+
+    depart = datetime(2026, 4, 18, 12, 0, tzinfo=UTC)
+    destination = (38.20, -76.30)
+
+    pts = [
+        IsochronePoint(
+            lat=37.90 + 0.003 * (i % 5),
+            lon=-76.20 + 0.003 * (i // 5),
+            t=depart,
+        )
+        for i in range(30)
+    ]
+
+    bare = sector_prune(pts, destination, n_sectors=4, min_frontier_floor=0)
+    floored = sector_prune(pts, destination, n_sectors=4, min_frontier_floor=15)
+
+    assert len(bare) <= 4, f"pre-condition: 4 sectors should cap bare at 4, got {len(bare)}"
+    assert len(floored) == 15
+    # Every bucketed survivor is still present after the floor kicks in.
+    bare_ids = {id(p) for p in bare}
+    floored_ids = {id(p) for p in floored}
+    assert bare_ids <= floored_ids
+
+
+def test_sector_prune_retains_obliquely_progressing_points() -> None:
+    """A point at ~105° off axis — beyond the 90° bucketing window —
+    must still survive when the frontier is thin. The floor fallback
+    (nearest-to-destination backfill) is what preserves it.
+
+    Why: widening `half_width` itself to keep such points also lets
+    the frontier fan out laterally on every step and eventually
+    escape forecast coverage in open-water transits. The floor keeps
+    the oblique-progress case without that side-effect.
+    """
+    from app.services.router import IsochronePoint
+    from app.services.geo import advance, bearing_deg
+
+    depart = datetime(2026, 4, 18, 12, 0, tzinfo=UTC)
+    centroid = (38.0, -76.2)
+    destination = (38.20, -76.30)
+    axis = bearing_deg(centroid[0], centroid[1], destination[0], destination[1])
+
+    oblique_lat, oblique_lon = advance(centroid[0], centroid[1], (axis + 105) % 360, 2.0)
+    anchor_lat = 2 * centroid[0] - oblique_lat
+    anchor_lon = 2 * centroid[1] - oblique_lon
+    pts = [
+        IsochronePoint(lat=oblique_lat, lon=oblique_lon, t=depart),
+        IsochronePoint(lat=anchor_lat, lon=anchor_lon, t=depart),
+    ]
+
+    pruned = sector_prune(pts, destination)  # default floor backfills
+    assert any(
+        p.lat == oblique_lat and p.lon == oblique_lon for p in pruned
+    ), "oblique-progress point dropped — floor backfill regressed"
