@@ -262,14 +262,28 @@ _stage_entry_at: dict[tuple[str, str], float] = {}
 
 
 async def set_stage(voyage_id: str, stage: str, *, pct: float = 0.0, detail: str | None = None) -> None:
-    """Flip `status` + write an initial progress blob for the stage."""
+    """Flip `status` + write an initial progress blob for the stage.
+
+    Preserves `eta_s` from the previous progress blob so the ETA
+    computed at POST time (or the live value carried from a prior
+    stage) survives the transition. Stages that want to overwrite
+    the ETA should do so with a subsequent `write_progress`.
+    """
     async with session_scope() as session:
         row = await session.get(Voyage, voyage_id)
         if row is None:
             raise LookupError(f"voyage {voyage_id} not found")
         prev = row.status
+        prev_eta: float | None = None
+        try:
+            prev_progress = json.loads(row.progress_json or "{}")
+            prev_eta = prev_progress.get("eta_s")
+        except json.JSONDecodeError:
+            prev_eta = None
         row.status = stage
-        row.progress_json = json.dumps({"stage": stage, "pct": pct, "detail": detail})
+        row.progress_json = json.dumps(
+            {"stage": stage, "pct": pct, "detail": detail, "eta_s": prev_eta}
+        )
     now = time.monotonic()
     entry = _stage_entry_at.pop((voyage_id, prev), None)
     if entry is not None and prev in LIVE_STAGES:
@@ -280,14 +294,28 @@ async def set_stage(voyage_id: str, stage: str, *, pct: float = 0.0, detail: str
 
 
 async def write_progress(
-    voyage_id: str, stage: str, pct: float, detail: str | None = None, eta_s: float | None = None
+    voyage_id: str,
+    stage: str,
+    pct: float,
+    detail: str | None = None,
+    eta_s: float | None = None,
 ) -> None:
     """Update the progress blob within the current stage. Callers are
-    responsible for rate limiting (`ProgressThrottle` in planner.py)."""
+    responsible for rate limiting (`ProgressThrottle` in planner.py).
+
+    If `eta_s` is None the previously-stored value is preserved rather
+    than overwritten to null. Pass `eta_s=0.0` to explicitly clear.
+    """
     async with session_scope() as session:
         row = await session.get(Voyage, voyage_id)
         if row is None:
             return
+        if eta_s is None:
+            try:
+                prev = json.loads(row.progress_json or "{}")
+                eta_s = prev.get("eta_s")
+            except json.JSONDecodeError:
+                eta_s = None
         row.progress_json = json.dumps(
             {"stage": stage, "pct": pct, "detail": detail, "eta_s": eta_s}
         )

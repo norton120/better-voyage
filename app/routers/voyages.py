@@ -28,14 +28,19 @@ from app.schemas.response import (
     VoyageError,
     VoyageState,
 )
+from app.config import get_settings
+from app.db import session_scope
 from app.services import boat_profiles
+from app.services.eta import estimate_eta
 from app.services.jobs import (
     LIVE_STAGES,
     JobRegistry,
     delete_voyage,
     find_existing,
     insert_voyage,
+    write_progress,
 )
+from app.services.planner import _adaptive_step_hours, enumerate_departures
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/voyages", tags=["voyages"])
@@ -121,6 +126,39 @@ def _accepted(row: Voyage) -> AcceptedResponse:
     )
 
 
+async def _attach_eta(voyage_id: str, req: VoyageRequest) -> None:
+    """Compute submit-time ETA + store on the voyage's progress blob.
+
+    Fails soft: if the ETA lookup raises (DB hiccup, bad past data),
+    we log and skip — the user gets a voyage without an upfront ETA
+    rather than a failed submission.
+    """
+    try:
+        settings = get_settings()
+        real_charts = settings.chart_store_mode == "real"
+        n_candidates = len(
+            enumerate_departures(req, step_hours=_adaptive_step_hours(req))
+        )
+        async with session_scope() as session:
+            eta = await estimate_eta(
+                req,
+                real_charts=real_charts,
+                n_candidates=n_candidates,
+                session=session,
+            )
+        await write_progress(voyage_id, "queued", 0.0, eta_s=eta.eta_seconds)
+        log.info(
+            "eta.submit",
+            voyage_id=voyage_id,
+            eta_seconds=int(eta.eta_seconds),
+            basis=eta.basis,
+            sample_size=eta.sample_size,
+            n_candidates=n_candidates,
+        )
+    except Exception:
+        log.exception("eta.submit.failed", voyage_id=voyage_id)
+
+
 def _registry(request: Request) -> JobRegistry:
     reg = getattr(request.app.state, "registry", None)
     if reg is None:
@@ -166,6 +204,7 @@ async def post_voyage(
 
     if existing is None:
         vid = await insert_voyage(req)
+        await _attach_eta(vid, req)
         await registry.submit(vid)
         row = await _load(vid)
         response.status_code = status.HTTP_202_ACCEPTED
@@ -195,6 +234,7 @@ async def post_voyage(
     # or hash differs and not live.
     await delete_voyage(existing.id)
     vid = await insert_voyage(req)
+    await _attach_eta(vid, req)
     await registry.submit(vid)
     row = await _load(vid)
     response.status_code = status.HTTP_202_ACCEPTED

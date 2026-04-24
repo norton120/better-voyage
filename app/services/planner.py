@@ -60,6 +60,7 @@ from app.services.router import (
     RouteResult,
     plan_candidate,
 )
+from app.services.eta import EtaEstimate, live_estimate
 from app.services.scorer import Score, score_candidate
 from app.services.summary import Summary, summarize
 
@@ -484,17 +485,31 @@ async def _stage_routing(state: PlanState) -> None:
             "departures": len(departures),
         },
     ):
+        done = [0]
+        routing_start = time.monotonic()
+
         async def _tick(total: int, done: list[int]) -> None:
             done[0] += 1
+            # Refine ETA from observed per-candidate rate so far. Once
+            # any candidate has completed, `live_estimate` is strictly
+            # more accurate than the submit-time prior for this host +
+            # this bbox. When nothing's completed yet, fall back to
+            # the stored value (preserved across set_stage).
+            elapsed = time.monotonic() - routing_start
+            live = live_estimate(
+                elapsed_s=elapsed,
+                candidates_done=done[0],
+                candidates_total=total,
+                fallback=EtaEstimate(0.0, 0.0, 0.0, "live", 0),
+            )
+            eta_override = live.eta_seconds if done[0] > 0 else None
             await write_progress(
                 state.voyage_id,
                 "routing",
                 done[0] / total,
                 detail=f"{done[0]} / {total} candidates routed",
+                eta_s=eta_override,
             )
-
-        done = [0]
-        routing_start = time.monotonic()
 
         async def _one(t: datetime) -> tuple[datetime, RouteResult | None, str | None]:
             # Per-voyage wallclock cap: once the budget is spent, any
