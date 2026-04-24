@@ -264,10 +264,12 @@ _stage_entry_at: dict[tuple[str, str], float] = {}
 async def set_stage(voyage_id: str, stage: str, *, pct: float = 0.0, detail: str | None = None) -> None:
     """Flip `status` + write an initial progress blob for the stage.
 
-    Preserves `eta_s` from the previous progress blob so the ETA
-    computed at POST time (or the live value carried from a prior
-    stage) survives the transition. Stages that want to overwrite
-    the ETA should do so with a subsequent `write_progress`.
+    Preserves `eta_s` + `eta_asof` from the previous progress blob so
+    the ETA computed at POST time (or the live value carried from a
+    prior stage) survives the transition. `eta_asof` is the wall-clock
+    instant at which the stored `eta_s` was made — the UI decrements
+    from it on each read so the user sees a ticking countdown rather
+    than a frozen "20 min" between stage boundaries.
     """
     async with session_scope() as session:
         row = await session.get(Voyage, voyage_id)
@@ -275,14 +277,23 @@ async def set_stage(voyage_id: str, stage: str, *, pct: float = 0.0, detail: str
             raise LookupError(f"voyage {voyage_id} not found")
         prev = row.status
         prev_eta: float | None = None
+        prev_asof: str | None = None
         try:
             prev_progress = json.loads(row.progress_json or "{}")
             prev_eta = prev_progress.get("eta_s")
+            prev_asof = prev_progress.get("eta_asof")
         except json.JSONDecodeError:
             prev_eta = None
+            prev_asof = None
         row.status = stage
         row.progress_json = json.dumps(
-            {"stage": stage, "pct": pct, "detail": detail, "eta_s": prev_eta}
+            {
+                "stage": stage,
+                "pct": pct,
+                "detail": detail,
+                "eta_s": prev_eta,
+                "eta_asof": prev_asof,
+            }
         )
     now = time.monotonic()
     entry = _stage_entry_at.pop((voyage_id, prev), None)
@@ -303,8 +314,11 @@ async def write_progress(
     """Update the progress blob within the current stage. Callers are
     responsible for rate limiting (`ProgressThrottle` in planner.py).
 
-    If `eta_s` is None the previously-stored value is preserved rather
-    than overwritten to null. Pass `eta_s=0.0` to explicitly clear.
+    If `eta_s` is None the previously-stored value (and its `eta_asof`
+    reference) is preserved rather than overwritten to null. Pass
+    `eta_s=0.0` to explicitly clear. When a fresh `eta_s` is supplied,
+    `eta_asof` is stamped to now (UTC ISO) so readers can decrement
+    the displayed remaining time against the wall clock.
     """
     async with session_scope() as session:
         row = await session.get(Voyage, voyage_id)
@@ -314,10 +328,20 @@ async def write_progress(
             try:
                 prev = json.loads(row.progress_json or "{}")
                 eta_s = prev.get("eta_s")
+                eta_asof = prev.get("eta_asof")
             except json.JSONDecodeError:
                 eta_s = None
+                eta_asof = None
+        else:
+            eta_asof = utc_now().isoformat()
         row.progress_json = json.dumps(
-            {"stage": stage, "pct": pct, "detail": detail, "eta_s": eta_s}
+            {
+                "stage": stage,
+                "pct": pct,
+                "detail": detail,
+                "eta_s": eta_s,
+                "eta_asof": eta_asof,
+            }
         )
 
 

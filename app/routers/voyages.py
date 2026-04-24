@@ -9,7 +9,7 @@ rejects with 409.
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response, status
@@ -54,6 +54,28 @@ def _links(voyage_id: str) -> Links:
     )
 
 
+def _eta_remaining_s(payload: dict[str, Any]) -> float | None:
+    """Decrement stored `eta_s` against `eta_asof` so the progress
+    ETA ticks down between updates rather than freezing at the
+    submit-time or last-tick value."""
+    stored = payload.get("eta_s")
+    if stored is None:
+        return None
+    asof_raw = payload.get("eta_asof")
+    if not asof_raw:
+        return float(stored)
+    try:
+        asof = datetime.fromisoformat(asof_raw)
+    except (TypeError, ValueError):
+        return float(stored)
+    from datetime import UTC as _UTC
+    now = datetime.now(_UTC)
+    if asof.tzinfo is None:
+        asof = asof.replace(tzinfo=_UTC)
+    elapsed = max(0.0, (now - asof).total_seconds())
+    return max(0.0, float(stored) - elapsed)
+
+
 def _progress(row: Voyage) -> Progress:
     try:
         payload: dict[str, Any] = json.loads(row.progress_json or "{}")
@@ -63,7 +85,7 @@ def _progress(row: Voyage) -> Progress:
         stage=payload.get("stage", row.status),
         pct=float(payload.get("pct") or 0.0),
         detail=payload.get("detail"),
-        eta_s=payload.get("eta_s"),
+        eta_s=_eta_remaining_s(payload),
     )
 
 

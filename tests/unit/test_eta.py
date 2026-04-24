@@ -189,3 +189,43 @@ def test_live_estimate_uses_fallback_before_first_completion() -> None:
         elapsed_s=10.0, candidates_done=0, candidates_total=10, fallback=fallback
     )
     assert est is fallback
+
+
+def test_eta_remaining_decrements_between_polls() -> None:
+    """Stored `eta_s` + `eta_asof` → readers compute remaining from
+    wall clock. A user watching the detail page must see the ETA tick
+    down between polls, not freeze at the submit-time value.
+
+    Both the UI-side and API-side helpers must agree.
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+    from datetime import timedelta
+
+    from app.routers.voyages import _eta_remaining_s as _api_eta
+    from app.ui.router import _eta_remaining_s as _ui_eta
+
+    now = _dt.now(_UTC)
+    payload = {
+        "stage": "forecast_prefetching",
+        "pct": 0.1,
+        "detail": None,
+        "eta_s": 300.0,
+        "eta_asof": (now - timedelta(seconds=45)).isoformat(),
+    }
+    ui_value = _ui_eta(payload)
+    api_value = _api_eta(payload)
+    assert ui_value is not None and api_value is not None
+    # 300 - 45 = 255 s remaining (±1 s for test clock jitter).
+    assert 253.0 < ui_value < 257.0
+    assert 253.0 < api_value < 257.0
+
+
+def test_eta_remaining_without_asof_returns_raw() -> None:
+    """Legacy progress blobs written before eta_asof was introduced
+    should still surface the stored ETA (no decrement)."""
+    from app.routers.voyages import _eta_remaining_s as _api_eta
+
+    assert _api_eta({"eta_s": 120.0}) == 120.0
+    assert _api_eta({"eta_s": 0.0}) == 0.0
+    assert _api_eta({}) is None

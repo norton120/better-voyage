@@ -189,22 +189,30 @@
 
   if (resetBtn) resetBtn.addEventListener('click', resetPicks);
 
-  map.on('click', (e) => {
-    if (!originMarker) {
-      setOrigin(e.latlng);
-    } else if (!destMarker) {
-      setDestination(e.latlng);
-    } else {
-      // Third click — treat as "move the closer endpoint."
-      const toOrigin = e.latlng.distanceTo(originMarker.getLatLng());
-      const toDest = e.latlng.distanceTo(destMarker.getLatLng());
-      if (toOrigin < toDest) {
+  // Pick-mode is only active when the planner form is present. On the
+  // voyage detail page (`/v/{id}`) the form inputs don't exist and we
+  // should NOT treat a stray map click as "move an endpoint" — the
+  // voyage is already routed (or routing) against fixed points.
+  const PICK_MODE = !!originLat;
+
+  if (PICK_MODE) {
+    map.on('click', (e) => {
+      if (!originMarker) {
         setOrigin(e.latlng);
-      } else {
+      } else if (!destMarker) {
         setDestination(e.latlng);
+      } else {
+        // Third click — treat as "move the closer endpoint."
+        const toOrigin = e.latlng.distanceTo(originMarker.getLatLng());
+        const toDest = e.latlng.distanceTo(destMarker.getLatLng());
+        if (toOrigin < toDest) {
+          setOrigin(e.latlng);
+        } else {
+          setDestination(e.latlng);
+        }
       }
-    }
-  });
+    });
+  }
 
   // ---------------- candidate → draw on map ----------------
 

@@ -338,6 +338,34 @@ def _parse_local_time(s: str) -> time | None:
     return time.fromisoformat(s)
 
 
+def _eta_remaining_s(progress: dict[str, Any]) -> float | None:
+    """Compute remaining-from-now ETA, decrementing from `eta_asof`.
+
+    Between stage transitions `eta_s` is static (only rewritten at
+    submit and during routing ticks). Without this decrement the UI
+    displays a frozen "20 min" while charts fetch and the forecast
+    prefetch runs. Reading `eta_asof` — the wall-clock instant the
+    estimate was produced — lets us subtract elapsed real time so the
+    user sees the countdown tick on every poll.
+    """
+    stored = progress.get("eta_s")
+    if stored is None:
+        return None
+    asof_raw = progress.get("eta_asof")
+    if not asof_raw:
+        return float(stored)
+    try:
+        asof = datetime.fromisoformat(asof_raw)
+    except (TypeError, ValueError):
+        return float(stored)
+    from datetime import UTC as _UTC
+    now = datetime.now(_UTC)
+    if asof.tzinfo is None:
+        asof = asof.replace(tzinfo=_UTC)
+    elapsed = max(0.0, (now - asof).total_seconds())
+    return max(0.0, float(stored) - elapsed)
+
+
 def _row_view(row: Voyage) -> dict[str, Any]:
     try:
         progress = json.loads(row.progress_json or "{}")
@@ -353,7 +381,7 @@ def _row_view(row: Voyage) -> dict[str, Any]:
         "stage": progress.get("stage", row.status),
         "pct": float(progress.get("pct") or 0.0),
         "detail": progress.get("detail"),
-        "eta_s": progress.get("eta_s"),
+        "eta_s": _eta_remaining_s(progress),
         "error_code": row.error_code,
         "error_detail": row.error_detail,
         "coverage": coverage,
