@@ -303,7 +303,7 @@ def plan_escape_hatches(
                 boat=_tightened(boat, trigger),
                 objective=objective,
                 step_minutes=60,
-                max_steps=48,
+                max_passage_hours=48,
                 arrival_tolerance_nm=0.5,
             )
         except RouterError as exc:

@@ -69,7 +69,7 @@ def test_router_reaches_destination_on_beam_reach() -> None:
         charts=charts,
         boat=BoatLimits(),
         step_minutes=30,
-        max_steps=48,
+        max_passage_hours=24,
         arrival_tolerance_nm=1.0,
     )
 
@@ -94,10 +94,10 @@ def test_router_graduated_steps_thread_a_tight_channel() -> None:
     from app.services.geo import distance_nm
 
     class TightChannelCharts:
-        def crosses_land(self, a, b) -> bool:
+        def crosses_land(self, a, b, margin_nm: float = 0.0) -> bool:
             return distance_nm(a[0], a[1], b[0], b[1]) > 3.0
 
-        def crosses_obstacle(self, a, b) -> bool:
+        def crosses_obstacle(self, a, b, margin_nm: float = 0.0) -> bool:
             return False
 
         def is_restricted(self, pt) -> bool:
@@ -141,6 +141,29 @@ def test_router_graduated_steps_thread_a_tight_channel() -> None:
             boat=BoatLimits(),
             step_minutes=60, fine_step_minutes=60,
             arrival_tolerance_nm=0.5,
+        )
+
+
+def test_router_passage_hours_caps_ete() -> None:
+    """`max_passage_hours` times out runs that can't arrive inside the window."""
+    polar = Polar.load(DEFAULT_POLAR_PATH)
+    depart = datetime(2026, 4, 18, 12, 0, tzinfo=UTC)
+    origin = (38.5, -76.5)
+    # ~500 nm east — unreachable in 2 h at ~5 kt.
+    destination = (38.5, -66.0)
+    field = _uniform_field(
+        lat_bounds=(38.0, 39.0),
+        lon_bounds=(-77.0, -65.0),
+        start=depart, hours=12,
+        wind_kts=10.0, wind_from_deg=180.0,
+    )
+    with pytest.raises(RouterError, match="ROUTE_TIMEOUT"):
+        plan_candidate(
+            origin=origin, destination=destination, depart_at=depart,
+            polar=polar, forecast=field, charts=NullChartStore(),
+            boat=BoatLimits(),
+            step_minutes=30,
+            max_passage_hours=2.0,
         )
 
 
@@ -211,7 +234,7 @@ def test_router_emits_bv_router_metrics(monkeypatch: pytest.MonkeyPatch) -> None
         charts=NullChartStore(),
         boat=BoatLimits(),
         step_minutes=30,
-        max_steps=48,
+        max_passage_hours=24,
         arrival_tolerance_nm=1.0,
     )
 
@@ -273,6 +296,80 @@ def test_sector_prune_keeps_one_per_sector() -> None:
     destination = (38.5, -75.0)
     pruned = sector_prune(pts, destination, n_sectors=16, min_frontier_floor=0)
     assert 1 <= len(pruned) <= 16
+
+
+def test_polygon_prune_preserves_convex_ring() -> None:
+    """A pure convex octagon walked in order yields every input point —
+    nothing is pruned because every vertex is on the boundary."""
+    from app.services.router import IsochronePoint, polygon_prune
+
+    depart = datetime(2026, 4, 18, 12, 0, tzinfo=UTC)
+    ring = [
+        (38.6, -76.5), (38.57, -76.43), (38.5, -76.4), (38.43, -76.43),
+        (38.4, -76.5), (38.43, -76.57), (38.5, -76.6), (38.57, -76.57),
+    ]
+    pts = [IsochronePoint(lat=la, lon=lo, t=depart) for (la, lo) in ring]
+    destination = (38.5, -75.0)
+    kept = polygon_prune(pts, destination, min_frontier_floor=0)
+    assert len(kept) == len(pts)
+    kept_ids = {id(p) for p in kept}
+    assert kept_ids == {id(p) for p in pts}
+
+
+def test_polygon_prune_output_is_subset_of_input() -> None:
+    """Whatever the input shape, `polygon_prune` returns only points
+    that were supplied — no synthesized vertices leak through the
+    shapely round-trip."""
+    from app.services.router import IsochronePoint, polygon_prune
+
+    depart = datetime(2026, 4, 18, 12, 0, tzinfo=UTC)
+    ring = [
+        (38.6, -76.5), (38.57, -76.43), (38.5, -76.4), (38.43, -76.43),
+        (38.4, -76.5), (38.43, -76.57), (38.5, -76.6), (38.57, -76.57),
+    ]
+    pts = [IsochronePoint(lat=la, lon=lo, t=depart) for (la, lo) in ring]
+    # Intentionally perturb order so buffer(0) has self-intersections
+    # to clean up. Every returned point still needs to be from `pts`.
+    pts = pts[::2] + pts[1::2]
+    destination = (38.5, -75.0)
+    kept = polygon_prune(pts, destination, min_frontier_floor=0)
+    input_ids = {id(p) for p in pts}
+    assert all(id(p) in input_ids for p in kept)
+    assert len(kept) <= len(pts)
+
+
+def test_polygon_prune_degenerate_inputs() -> None:
+    from app.services.router import IsochronePoint, polygon_prune
+
+    depart = datetime(2026, 4, 18, 12, 0, tzinfo=UTC)
+    destination = (38.5, -75.0)
+    # <4 points → returned unchanged.
+    assert polygon_prune([], destination) == []
+    p = [IsochronePoint(lat=38.5, lon=-76.5, t=depart)]
+    assert polygon_prune(p, destination) == p
+
+
+def test_router_polygon_prune_reaches_destination() -> None:
+    """Sanity: a beam-reach passage that succeeds under sector pruning
+    also succeeds when `prune_mode="polygon"`."""
+    polar = Polar.load(DEFAULT_POLAR_PATH)
+    charts = NullChartStore()
+    depart = datetime(2026, 4, 18, 12, 0, tzinfo=UTC)
+    origin = (38.5, -76.5)
+    destination = (38.5, -76.07)
+    field = _uniform_field(
+        lat_bounds=(38.3, 38.7), lon_bounds=(-76.6, -75.9),
+        start=depart, hours=24,
+        wind_kts=12.0, wind_from_deg=180.0,
+    )
+    result = plan_candidate(
+        origin=origin, destination=destination, depart_at=depart,
+        polar=polar, forecast=field, charts=charts, boat=BoatLimits(),
+        step_minutes=30, max_passage_hours=24,
+        arrival_tolerance_nm=1.0, prune_mode="polygon",
+    )
+    assert result.points[-1].lat == pytest.approx(destination[0], abs=0.1)
+    assert result.points[-1].lon == pytest.approx(destination[1], abs=0.1)
 
 
 def test_sector_prune_floors_collapsing_frontier() -> None:

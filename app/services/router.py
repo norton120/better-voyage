@@ -33,6 +33,8 @@ from datetime import datetime, timedelta
 from math import cos, radians
 from typing import TYPE_CHECKING, Literal
 
+from shapely.geometry import Polygon
+
 from app.observability import meter
 from app.services.geo import advance, bearing_deg, distance_nm, relative_wind_angle
 
@@ -229,6 +231,87 @@ def sector_prune(
     return kept
 
 
+# --- polygon pruning (plan/17 step 4, experimental) -------------------------
+
+
+PruneMode = Literal["sector", "polygon"]
+
+
+def polygon_prune(
+    points: list[IsochronePoint],
+    destination: tuple[float, float],
+    min_frontier_floor: int = 20,
+) -> list[IsochronePoint]:
+    """Hagiwara-style isochrone pruning via polygon `Normalize`.
+
+    plan/17 step 4. Mirrors weather_routing_pi's `IsoRoute::Normalize` +
+    `ReduceClosePoints`: treat the frontier as a closed polygon walked
+    in insertion order (parent-major, heading-minor → a boundary walk
+    of the reachable set by induction from the origin). Shapely's
+    `buffer(0)` resolves self-intersections robustly, returning a valid
+    polygon. We then remap exterior-ring coords back to the originating
+    `IsochronePoint`s by nearest-neighbor.
+
+    **Experimental.** Gated behind `plan_candidate(prune_mode="polygon")`.
+    Known limits tracked in plan/17:
+
+    - No multi-polygon / hole support. A MultiPolygon output is
+      collapsed to its largest piece; tactical reachability in the
+      smaller pieces is lost.
+    - Nearest-neighbor remap can pick a duplicate if `buffer(0)`
+      inserts a new vertex on an edge — the `seen` set deduplicates
+      but may still lose a distinct point in dense regions.
+    - Degenerate inputs (<4 points) short-circuit to the input
+      unchanged.
+
+    Falls back to returning `points` unchanged on any shapely error,
+    so a pathological frontier can't brick the run.
+    """
+    if len(points) < 4:
+        return list(points)
+
+    coords = [(p.lon, p.lat) for p in points]
+    if coords[0] != coords[-1]:
+        coords.append(coords[0])
+
+    try:
+        poly = Polygon(coords).buffer(0)
+    except Exception:
+        return list(points)
+
+    if poly.is_empty:
+        return list(points)
+
+    if poly.geom_type == "MultiPolygon":
+        poly = max(poly.geoms, key=lambda g: g.area)
+    if poly.geom_type != "Polygon":
+        return list(points)
+
+    ring = list(poly.exterior.coords)[:-1]
+    if not ring:
+        return list(points)
+
+    kept: list[IsochronePoint] = []
+    seen: set[int] = set()
+    for lon, lat in ring:
+        best = min(points, key=lambda p: (p.lon - lon) ** 2 + (p.lat - lat) ** 2)
+        if id(best) not in seen:
+            kept.append(best)
+            seen.add(id(best))
+
+    # Floor against frontier collapse — same safety net as sector_prune.
+    if len(kept) < min_frontier_floor and len(points) > len(kept):
+        kept_ids = {id(p) for p in kept}
+        extras = sorted(
+            (p for p in points if id(p) not in kept_ids),
+            key=lambda p: distance_nm(
+                p.lat, p.lon, destination[0], destination[1]
+            ),
+        )
+        kept.extend(extras[: min_frontier_floor - len(kept)])
+    return kept
+
+
 # --- motion step ------------------------------------------------------------
 
 
@@ -255,21 +338,37 @@ def plan_candidate(
     boat: BoatLimits,
     objective: Objective = "fastest",
     step_minutes: int = 60,
-    fine_step_minutes: int = 10,
+    fine_step_minutes: int = 2,
     shore_threshold_nm: float = 3.0,
-    max_steps: int = 168,
+    max_steps: int = 2000,
+    max_passage_hours: float = 168.0,
     arrival_tolerance_nm: float = 0.5,
+    safety_margin_land_nm: float = 0.5,
+    prune_mode: PruneMode = "sector",
 ) -> RouteResult:
     """Plan a single candidate departure.
 
-    Graduated step size (plan/04 §Step schedule): when any point on
-    the current frontier is within `shore_threshold_nm` of land, or
-    within `shore_threshold_nm` of the destination, use
+    Graduated step size (plan/04 §Step schedule, plan/17 step 3):
+    when any point on the current frontier is within
+    `shore_threshold_nm` of land or of the destination, use
     `fine_step_minutes` — small enough to thread narrow channels
     without the straight-line segment between isochrone points
     jumping over land. Otherwise use the coarse `step_minutes`.
     The fine mode also swaps to a denser heading fan for better
     channel coverage.
+
+    Two termination budgets:
+
+    - `max_passage_hours` caps the planned ETA (default 168 h, the
+      forecast horizon from plan/04).
+    - `max_steps` is a safety-valve bound on total loop iterations;
+      it only fires if the inner loop somehow fails to advance time.
+
+    `safety_margin_land_nm` (plan/17 step 2) buffers every land /
+    obstacle segment test by this many nm. Coarse coastline data —
+    GEBCO grid cells, OSM coastline decimation — can leave narrow
+    ribbons of "navigable water" that are actually beach. The
+    buffer turns a marginal clearance into a hard rejection.
     """
     coarse_delta = timedelta(minutes=step_minutes)
     fine_delta = timedelta(minutes=fine_step_minutes)
@@ -339,6 +438,7 @@ def plan_candidate(
     # generic "empty frontier."
     reject_totals: dict[str, int] = {}
 
+    max_passage_delta = timedelta(hours=max_passage_hours)
     for step in range(1, max_steps + 1):
         frontier_pts = isochrones[-1]
         fine_mode = _frontier_near_shore(frontier_pts)
@@ -346,6 +446,14 @@ def plan_candidate(
         step_delta = fine_delta if fine_mode else coarse_delta
         current_t = current_t + step_delta
         t = current_t
+        if current_t - depart_at > max_passage_delta:
+            _steps.record(step, outcome_labels)
+            _wallclock.record(time.monotonic() - t0, outcome_labels)
+            _outcomes.add(1, {**outcome_labels, "outcome": "timeout"})
+            raise RouterError(
+                "ROUTE_TIMEOUT",
+                detail=f"exceeded max_passage_hours={max_passage_hours}",
+            )
         frontier: list[IsochronePoint] = []
         fan_fn = heading_fan_fine if fine_mode else heading_fan
         rejects: dict[str, int] = {}
@@ -369,10 +477,14 @@ def plan_candidate(
 
                 new_lat, new_lon = _advance_with_current(pt.lat, pt.lon, h, bsp, env, step_h)
 
-                if charts.crosses_land((pt.lat, pt.lon), (new_lat, new_lon)):
+                if charts.crosses_land(
+                    (pt.lat, pt.lon), (new_lat, new_lon), safety_margin_land_nm
+                ):
                     rejects["crosses_land"] = rejects.get("crosses_land", 0) + 1
                     continue
-                if charts.crosses_obstacle((pt.lat, pt.lon), (new_lat, new_lon)):
+                if charts.crosses_obstacle(
+                    (pt.lat, pt.lon), (new_lat, new_lon), safety_margin_land_nm
+                ):
                     rejects["crosses_obstacle"] = rejects.get("crosses_obstacle", 0) + 1
                     continue
                 if charts.is_restricted((new_lat, new_lon)):
@@ -456,13 +568,18 @@ def plan_candidate(
                 isochrones=isochrones,
             )
 
-        pruned = sector_prune(frontier, destination, objective=objective)
+        if prune_mode == "polygon":
+            pruned = polygon_prune(frontier, destination)
+        else:
+            pruned = sector_prune(frontier, destination, objective=objective)
         isochrones.append(pruned)
 
     _steps.record(max_steps, outcome_labels)
     _wallclock.record(time.monotonic() - t0, outcome_labels)
     _outcomes.add(1, {**outcome_labels, "outcome": "timeout"})
-    raise RouterError("ROUTE_TIMEOUT", detail=f"exhausted {max_steps} steps")
+    raise RouterError(
+        "ROUTE_TIMEOUT", detail=f"exhausted max_steps={max_steps} (safety-valve)"
+    )
 
 
 def _backtrack(final: IsochronePoint) -> list[IsochronePoint]:

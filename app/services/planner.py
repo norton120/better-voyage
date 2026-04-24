@@ -369,7 +369,7 @@ async def _route_one(
                 boat=boat,
                 objective=state.req.objective,
                 step_minutes=60,
-                max_steps=168,
+                max_passage_hours=168,
                 arrival_tolerance_nm=0.5,
             )
             return depart_at, result, None

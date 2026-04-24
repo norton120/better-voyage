@@ -31,10 +31,11 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from shapely.geometry import (
     LineString,
@@ -81,6 +82,20 @@ _cells_loaded_gauge = _m.create_counter(
     description="Cells + extracts loaded into the in-memory ChartStore",
     unit="1",
 )
+_segment_cache_events = _m.create_counter(
+    "bv.charts.segment_cache",
+    description="Segment-test LRU cache events by kind (land|obstacle) and result (hit|miss)",
+    unit="1",
+)
+
+# Segment-test LRU size. ~10k matches weather_routing_pi. Each entry is
+# ~200 bytes → ~2 MB cap. Quantization below means endpoints within
+# ~11 m fold into the same key.
+_SEGMENT_CACHE_MAX = 10_000
+# 4 decimal degrees ≈ 11 m. Fine enough that a cached answer remains
+# correct for any realistic router step, coarse enough that two
+# near-identical segments fold into one entry.
+_SEGMENT_QUANTIZE = 10_000
 
 
 @dataclass(frozen=True)
@@ -109,8 +124,8 @@ class Waypoint:
 class ChartStoreProtocol(Protocol):
     async def coverage(self, bbox: Bbox) -> ChartCoverage: ...
     async def ensure_coverage(self, bbox: Bbox) -> None: ...
-    def crosses_land(self, a: Coord, b: Coord) -> bool: ...
-    def crosses_obstacle(self, a: Coord, b: Coord) -> bool: ...
+    def crosses_land(self, a: Coord, b: Coord, margin_nm: float = 0.0) -> bool: ...
+    def crosses_obstacle(self, a: Coord, b: Coord, margin_nm: float = 0.0) -> bool: ...
     def is_restricted(self, pt: Coord) -> bool: ...
     def chart_depth(self, lat: float, lon: float) -> float | None: ...
     def available_depth(self, lat: float, lon: float, t: datetime) -> float | None: ...
@@ -179,6 +194,13 @@ class ChartStore:
         self._gebco_tile_id: str | None = None
         self._bbox_locks: dict[tuple[float, ...], asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
+        # Segment-test LRU: key = (kind, q_lat_a, q_lon_a, q_lat_b, q_lon_b,
+        # q_margin_centinm). Cleared on _rebuild_indices so cached answers
+        # can't outlive the trees they were computed against. `margin_nm`
+        # is part of the key so a 0 nm answer can't shadow a 0.5 nm answer.
+        self._segment_cache: OrderedDict[
+            tuple[str, int, int, int, int, int], bool
+        ] = OrderedDict()
 
     # ---- coverage / ensure_coverage ---------------------------------
 
@@ -265,12 +287,26 @@ class ChartStore:
 
     # ---- queries (sync, called from the router hot loop) ------------
 
-    def crosses_land(self, a: Coord, b: Coord) -> bool:
-        return self._crosses_layer(a, b, self._land_tree, self._land_geoms, "land")
+    def crosses_land(self, a: Coord, b: Coord, margin_nm: float = 0.0) -> bool:
+        return self._cached_segment_query(
+            "land",
+            a,
+            b,
+            margin_nm,
+            lambda: self._crosses_layer(
+                a, b, self._land_tree, self._land_geoms, "land", margin_nm
+            ),
+        )
 
-    def crosses_obstacle(self, a: Coord, b: Coord) -> bool:
-        return self._crosses_layer(
-            a, b, self._obstacle_tree, self._obstacle_geoms, "obstacle"
+    def crosses_obstacle(self, a: Coord, b: Coord, margin_nm: float = 0.0) -> bool:
+        return self._cached_segment_query(
+            "obstacle",
+            a,
+            b,
+            margin_nm,
+            lambda: self._crosses_layer(
+                a, b, self._obstacle_tree, self._obstacle_geoms, "obstacle", margin_nm
+            ),
         )
 
     def is_restricted(self, pt: Coord) -> bool:
@@ -351,6 +387,41 @@ class ChartStore:
 
     # ---- internals --------------------------------------------------
 
+    def _cached_segment_query(
+        self,
+        kind: str,
+        a: Coord,
+        b: Coord,
+        margin_nm: float,
+        compute: Callable[[], bool],
+    ) -> bool:
+        """LRU-cached wrapper for segment-vs-layer tests.
+
+        Endpoints are quantized to ~11 m; margin to 0.01 nm. The cache
+        is cleared whenever `_rebuild_indices` runs, so a cached answer
+        is always against the currently-loaded geometry.
+        """
+        key = (
+            kind,
+            int(a[0] * _SEGMENT_QUANTIZE),
+            int(a[1] * _SEGMENT_QUANTIZE),
+            int(b[0] * _SEGMENT_QUANTIZE),
+            int(b[1] * _SEGMENT_QUANTIZE),
+            int(max(margin_nm, 0.0) * 100),
+        )
+        cache = self._segment_cache
+        hit = cache.get(key)
+        if hit is not None:
+            cache.move_to_end(key)
+            _segment_cache_events.add(1, {"kind": kind, "result": "hit"})
+            return hit
+        value = compute()
+        cache[key] = value
+        if len(cache) > _SEGMENT_CACHE_MAX:
+            cache.popitem(last=False)
+        _segment_cache_events.add(1, {"kind": kind, "result": "miss"})
+        return value
+
     def _crosses_layer(
         self,
         a: Coord,
@@ -358,15 +429,29 @@ class ChartStore:
         tree: STRtree | None,
         geoms: list[Any],
         kind: str,
+        margin_nm: float = 0.0,
     ) -> bool:
+        """Segment-vs-layer intersection, optionally buffered by `margin_nm`.
+
+        `margin_nm > 0` expands the test segment into a capsule of the
+        given half-width before the intersection check — so routes stay
+        that far clear of any loaded geom. The conversion treats 1° ≈
+        60 nm uniformly in lat and lon; at mid-latitudes this slightly
+        over-buffers in the east-west direction (in nm), which is the
+        safe direction for a safety margin.
+        """
         t0 = time.monotonic()
         _queries.add(1, {"kind": kind})
         try:
             if tree is None:
                 return False
             seg = LineString([(a[1], a[0]), (b[1], b[0])])
-            idx = tree.query(seg)
-            return any(geoms[i].intersects(seg) for i in idx)
+            if margin_nm > 0.0:
+                probe = seg.buffer(margin_nm / 60.0)
+            else:
+                probe = seg
+            idx = tree.query(probe)
+            return any(geoms[i].intersects(probe) for i in idx)
         finally:
             _query_duration.record(
                 time.monotonic() - t0, {"kind": kind}
@@ -521,6 +606,9 @@ class ChartStore:
         self._navaid_points = navaid_points
         self._navaid_waypoints = navaid_waypoints
         self._navaid_tree = STRtree(navaid_points) if navaid_points else None
+        # Cached segment answers were computed against the previous
+        # trees. Drop them now rather than risk stale answers.
+        self._segment_cache.clear()
 
         log.info(
             "charts.indices_rebuilt",
@@ -632,10 +720,10 @@ class NullChartStore:
     async def ensure_coverage(self, bbox: Bbox) -> None:
         return None
 
-    def crosses_land(self, a: Coord, b: Coord) -> bool:
+    def crosses_land(self, a: Coord, b: Coord, margin_nm: float = 0.0) -> bool:
         return False
 
-    def crosses_obstacle(self, a: Coord, b: Coord) -> bool:
+    def crosses_obstacle(self, a: Coord, b: Coord, margin_nm: float = 0.0) -> bool:
         return False
 
     def is_restricted(self, pt: Coord) -> bool:
