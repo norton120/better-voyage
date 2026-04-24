@@ -172,14 +172,19 @@ async def test_empirical_at_large_sample() -> None:
 
 
 def test_live_estimate_refines_from_rate() -> None:
-    """Once any candidate has completed we have a real rate to use."""
+    """Once any candidate has completed we have a real rate to use.
+
+    2 of 10 done, 60 s elapsed → 30 s/candidate → 8 × 30 = 240 s of
+    routing left. Plus `_POST_OVERHEAD_S` (scoring/GPX/summary) = 255.
+    """
+    from app.services.eta import _POST_OVERHEAD_S
+
     fallback = EtaEstimate(600.0, 300.0, 900.0, "heuristic", 0)
-    # 2 of 10 done, 60 s elapsed → 30 s/candidate → 8 × 30 = 240 s remaining.
     est = live_estimate(
         elapsed_s=60.0, candidates_done=2, candidates_total=10, fallback=fallback
     )
     assert est.basis == "live"
-    assert est.eta_seconds == pytest.approx(240.0)
+    assert est.eta_seconds == pytest.approx(240.0 + _POST_OVERHEAD_S)
     assert est.eta_seconds_low < est.eta_seconds < est.eta_seconds_high
 
 

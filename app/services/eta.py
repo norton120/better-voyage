@@ -77,6 +77,14 @@ _PER_CANDIDATE_S: dict[tuple[bool, str], float] = {
     (True,  "ocean"): 1500.0,
 }
 
+# Non-routing overhead the user still waits through: chart load +
+# STRtree build + forecast prefetch + scoring + GPX + NL summary.
+# Null mode ships blank charts so prep is near-free; real mode can
+# take a minute or two on a cold bbox.
+_PREP_OVERHEAD_S: dict[bool, float] = {False: 15.0, True: 120.0}
+# Scoring + contingency + GPX emission + summary call. Same for both modes.
+_POST_OVERHEAD_S = 15.0
+
 # Window for empirical lookback. 30 days is long enough to gather
 # meaningful samples on a low-traffic deployment without letting
 # stale benchmarks (different charts release, different host) bias
@@ -114,7 +122,12 @@ def heuristic_estimate(
     req: VoyageRequest, *, real_charts: bool, n_candidates: int
 ) -> EtaEstimate:
     per = heuristic_per_candidate_s(req, real_charts=real_charts)
-    eta = per * max(1, n_candidates)
+    routing_s = per * max(1, n_candidates)
+    # Include prep (chart load + forecast prefetch) and post (scoring +
+    # GPX + summary) overhead — without these, pre-routing stages can
+    # drain the countdown to zero before routing even starts, and the
+    # subsequent live refinement reads as a wildly different estimate.
+    eta = _PREP_OVERHEAD_S[real_charts] + routing_s + _POST_OVERHEAD_S
     # Cold-start: wide range reflects that we don't actually know.
     return EtaEstimate(
         eta_seconds=eta,
@@ -248,12 +261,16 @@ def live_estimate(
     at least one completion we know the real cost on this host with
     this forecast, which is strictly better than the prior. Until
     then, fall back to the submit-time estimate (`fallback`).
+
+    Adds `_POST_OVERHEAD_S` for the scoring + contingency + GPX +
+    summary stages that follow routing, so the ETA represents real
+    remaining wall-clock, not just remaining-candidates-worth.
     """
     if candidates_done <= 0 or candidates_total <= 0:
         return fallback
     per_candidate = elapsed_s / candidates_done
     remaining = max(0, candidates_total - candidates_done)
-    eta = remaining * per_candidate
+    eta = remaining * per_candidate + _POST_OVERHEAD_S
     return EtaEstimate(
         eta_seconds=eta,
         eta_seconds_low=eta * 0.8,

@@ -14,11 +14,16 @@
     {% if voyage.detail %}<span class="stage-detail">— {{ voyage.detail }}</span>{% endif %}
   </div>
   <div class="eta-line">
-    {% if voyage.eta_s %}
+    {% if voyage.eta_s is none %}
+      <span class="eta-label">estimating…</span>
+    {% elif voyage.eta_s < 30 %}
+      {# Near zero but still running — prep/post overhead not yet
+         accounted for, or the next stage is about to take over. Show
+         "wrapping up" rather than a misleading 0s. #}
+      <span class="eta-label">wrapping up…</span>
+    {% else %}
       <span class="eta-label">estimated time remaining:</span>
       <strong class="eta-value">{{ voyage.eta_s | humanize_eta }}</strong>
-    {% else %}
-      <span class="eta-label">estimating…</span>
     {% endif %}
   </div>
   <p class="bookmark-hint">
