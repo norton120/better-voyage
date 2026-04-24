@@ -44,6 +44,7 @@ from shapely.geometry import (
     box,
     shape,
 )
+from shapely.prepared import prep
 from shapely.strtree import STRtree
 
 from app.config import get_settings
@@ -178,8 +179,10 @@ class ChartStore:
         # Rebuilt after each ensure_coverage that adds new sources.
         self._land_tree: STRtree | None = None
         self._land_geoms: list[Any] = []
+        self._land_prepared: list[Any] = []
         self._obstacle_tree: STRtree | None = None
         self._obstacle_geoms: list[Any] = []
+        self._obstacle_prepared: list[Any] = []
         self._obstacle_meta: list[dict[str, Any]] = []
         self._restricted_tree: STRtree | None = None
         self._restricted_geoms: list[Any] = []
@@ -294,7 +297,8 @@ class ChartStore:
             b,
             margin_nm,
             lambda: self._crosses_layer(
-                a, b, self._land_tree, self._land_geoms, "land", margin_nm
+                a, b, self._land_tree, self._land_geoms,
+                self._land_prepared, "land", margin_nm,
             ),
         )
 
@@ -305,7 +309,8 @@ class ChartStore:
             b,
             margin_nm,
             lambda: self._crosses_layer(
-                a, b, self._obstacle_tree, self._obstacle_geoms, "obstacle", margin_nm
+                a, b, self._obstacle_tree, self._obstacle_geoms,
+                self._obstacle_prepared, "obstacle", margin_nm,
             ),
         )
 
@@ -428,6 +433,7 @@ class ChartStore:
         b: Coord,
         tree: STRtree | None,
         geoms: list[Any],
+        prepared: list[Any],
         kind: str,
         margin_nm: float = 0.0,
     ) -> bool:
@@ -439,6 +445,11 @@ class ChartStore:
         60 nm uniformly in lat and lon; at mid-latitudes this slightly
         over-buffers in the east-west direction (in nm), which is the
         safe direction for a safety margin.
+
+        Uses prepared geometries when available. In shapely 2.1
+        PreparedGeometry is not guaranteed thread-safe; callers running
+        this concurrently must serialize (the planner currently does
+        via Semaphore(1) — see `_stage_routing`).
         """
         t0 = time.monotonic()
         _queries.add(1, {"kind": kind})
@@ -451,6 +462,8 @@ class ChartStore:
             else:
                 probe = seg
             idx = tree.query(probe)
+            if prepared and len(prepared) == len(geoms):
+                return any(prepared[i].intersects(probe) for i in idx)
             return any(geoms[i].intersects(probe) for i in idx)
         finally:
             _query_duration.record(
@@ -595,9 +608,15 @@ class ChartStore:
 
         self._land_geoms = land_geoms
         self._land_tree = STRtree(land_geoms) if land_geoms else None
+        # Prepared geometries speed up repeated `.intersects()` calls by
+        # ~10–100x (plan/17 step 1 companion — load-bearing for real-
+        # chart routing). NOT guaranteed thread-safe in shapely 2.1;
+        # paired with semaphore=1 routing in `planner._stage_routing`.
+        self._land_prepared = [prep(g) for g in land_geoms]
         self._obstacle_geoms = obstacle_geoms
         self._obstacle_meta = obstacle_meta
         self._obstacle_tree = STRtree(obstacle_geoms) if obstacle_geoms else None
+        self._obstacle_prepared = [prep(g) for g in obstacle_geoms]
         self._restricted_geoms = restricted_geoms
         self._restricted_tree = STRtree(restricted_geoms) if restricted_geoms else None
         self._shallow_geoms = shallow_geoms

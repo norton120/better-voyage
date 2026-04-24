@@ -156,8 +156,24 @@ def _bbox_from_request(
     return (lat_min, lon_min, lat_max, lon_max)
 
 
+def _adaptive_step_hours(req: VoyageRequest) -> int:
+    """Step size adapts to window length: hourly for short windows (≤6 h),
+    3-hourly for long windows (>12 h). Fixed-1-hour enumeration on a
+    72 h window generates 73 candidates and the router serialises them
+    against a single ChartStore — at ~1-3 s per candidate on real
+    charts the pipeline wallclock balloons with no meaningful gain
+    since `max_candidates` already caps surfaced results to the top N.
+    """
+    window_h = (req.window.end_at - req.window.start_at).total_seconds() / 3600.0
+    if window_h <= 6:
+        return 1
+    if window_h <= 12:
+        return 2
+    return 3
+
+
 def enumerate_departures(req: VoyageRequest, step_hours: int = 1) -> list[datetime]:
-    """Hourly departure grid across `[window.start_at, window.end_at]`.
+    """Hourly (default) departure grid across `[window.start_at, window.end_at]`.
 
     Local-time constraints (`earliest_departure_local_time`,
     `latest_departure_local_time`) in the window's IANA tz drop
@@ -442,10 +458,15 @@ async def _stage_routing(state: PlanState) -> None:
         state.charts = charts
     state.polar = polar
     state.boat = boat
-    departures = enumerate_departures(state.req)
+    departures = enumerate_departures(state.req, step_hours=_adaptive_step_hours(state.req))
     _candidates_total.add(len(departures))
 
-    sem = asyncio.Semaphore(4)  # BV_MAX_CONCURRENT_ROUTES
+    # Serial routing — shapely PreparedGeometry (re-enabled below) is
+    # not guaranteed thread-safe under shapely 2.1; observed silent
+    # segfaults under asyncio.to_thread concurrency on real charts.
+    # Revisit when a safer pattern is confirmed (per-thread prep caches
+    # or a shapely 2.2+ guarantee).
+    sem = asyncio.Semaphore(1)
 
     with _tracer.start_as_current_span(
         "job.routing",

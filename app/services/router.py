@@ -343,7 +343,8 @@ def plan_candidate(
     max_steps: int = 2000,
     max_passage_hours: float = 168.0,
     arrival_tolerance_nm: float = 0.5,
-    safety_margin_land_nm: float = 0.5,
+    safety_margin_land_nm: float = 0.1,
+    wallclock_budget_s: float = 150.0,
     prune_mode: PruneMode = "sector",
 ) -> RouteResult:
     """Plan a single candidate departure.
@@ -440,6 +441,18 @@ def plan_candidate(
 
     max_passage_delta = timedelta(hours=max_passage_hours)
     for step in range(1, max_steps + 1):
+        elapsed_s = time.monotonic() - t0
+        if elapsed_s > wallclock_budget_s:
+            _steps.record(step, outcome_labels)
+            _wallclock.record(elapsed_s, outcome_labels)
+            _outcomes.add(1, {**outcome_labels, "outcome": "timeout"})
+            raise RouterError(
+                "ROUTE_TIMEOUT",
+                detail=(
+                    f"exceeded wallclock_budget_s={wallclock_budget_s} "
+                    f"after {step} steps (real-time cap, not passage time)"
+                ),
+            )
         frontier_pts = isochrones[-1]
         fine_mode = _frontier_near_shore(frontier_pts)
         step_h = fine_h if fine_mode else coarse_h
