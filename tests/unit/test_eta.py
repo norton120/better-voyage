@@ -113,11 +113,17 @@ async def test_blends_at_small_sample() -> None:
     all the way there.
     """
     req = _req()
+    # Per-candidate must match effective_routed_count (post-cap)
+    # so the observed rate we bake into the fake elapsed time is
+    # interpretable.
+    from app.services.planner import effective_routed_count
+
+    n_routed = effective_routed_count(req)
     rows = [
         _FakeRow(
             started_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
             completed_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC)
-                + timedelta(seconds=100 * 17),  # 17 candidates × 100 s each
+                + timedelta(seconds=100 * n_routed),
             req=req,
         )
         for _ in range(4)
@@ -141,11 +147,14 @@ async def test_blends_at_small_sample() -> None:
 async def test_empirical_at_large_sample() -> None:
     """n ≥ 10 → empirical median + p10/p90 bounds."""
     req = _req()
+    from app.services.planner import effective_routed_count
+
+    n_routed = effective_routed_count(req)
     rows = [
         _FakeRow(
             started_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
             completed_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC)
-                + timedelta(seconds=120 * 17),
+                + timedelta(seconds=120 * n_routed),
             req=req,
         )
         for _ in range(12)

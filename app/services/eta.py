@@ -135,10 +135,14 @@ def _per_candidate_from_row(row: Voyage) -> float | None:
         req = VoyageRequest.model_validate(req_data)
     except Exception:
         return None
-    # Same step logic as the planner — import lazily to avoid the
-    # circular that would otherwise form with `services.planner`.
-    from app.services.planner import _adaptive_step_hours, enumerate_departures
-    n = len(enumerate_departures(req, step_hours=_adaptive_step_hours(req)))
+    # `effective_routed_count` mirrors the planner's cap + adaptive-step
+    # logic. Imported lazily to avoid the circular with services.planner.
+    # For legacy pre-cap voyages this slightly inflates per-candidate
+    # seconds (divisor = 10 vs. historically-routed 56) but biases
+    # estimates high, which is the safe direction. Aged out of the
+    # 30-day lookback window in a few weeks.
+    from app.services.planner import effective_routed_count
+    n = effective_routed_count(req)
     if n <= 0:
         return None
     elapsed = (row.completed_at - row.started_at).total_seconds()

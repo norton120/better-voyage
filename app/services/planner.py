@@ -61,6 +61,7 @@ from app.services.router import (
     plan_candidate,
 )
 from app.services.eta import EtaEstimate, live_estimate
+from app.services.prefilter import prefilter_departures
 from app.services.scorer import Score, score_candidate
 from app.services.summary import Summary, summarize
 
@@ -77,6 +78,14 @@ _candidates_rejected = _m.create_counter("bv.voyages.candidates_rejected", unit=
 # margin. Voyages that exhaust this fail with ROUTE_BUDGET_EXHAUSTED and
 # surface however many candidates completed before the cap fired.
 _VOYAGE_WALLCLOCK_BUDGET_S = 2 * 60 * 60
+
+# Hard cap on how many departures we'll actually route — independent
+# of window length or `max_candidates`. Above this we prefilter with a
+# cheap forecast/polar proxy (`services.prefilter`) and only route the
+# best `_MAX_ROUTED_CANDIDATES`. Serious routers do this too — routing
+# all 56 candidates in a 7-day window is pure waste when the user
+# only wanted the top 3.
+_MAX_ROUTED_CANDIDATES = 10
 
 
 class PlannerError(Exception):
@@ -179,6 +188,17 @@ def _adaptive_step_hours(req: VoyageRequest) -> int:
     if window_h <= 12:
         return 2
     return 3
+
+
+def effective_routed_count(req: VoyageRequest) -> int:
+    """How many candidates the planner will actually route for this request.
+
+    Used by ETA estimation so the user-visible ETA doesn't include the
+    candidates we'll prefilter out before routing.
+    """
+    step = _adaptive_step_hours(req)
+    raw = len(enumerate_departures(req, step_hours=step))
+    return min(raw, _MAX_ROUTED_CANDIDATES)
 
 
 def enumerate_departures(req: VoyageRequest, step_hours: int = 1) -> list[datetime]:
@@ -467,7 +487,26 @@ async def _stage_routing(state: PlanState) -> None:
         state.charts = charts
     state.polar = polar
     state.boat = boat
-    departures = enumerate_departures(state.req, step_hours=_adaptive_step_hours(state.req))
+    departures = enumerate_departures(
+        state.req, step_hours=_adaptive_step_hours(state.req)
+    )
+    raw_count = len(departures)
+    if raw_count > _MAX_ROUTED_CANDIDATES:
+        assert state.forecast is not None  # guaranteed by forecast_prefetching
+        departures = prefilter_departures(
+            departures,
+            origin=(state.req.origin.lat, state.req.origin.lon),
+            destination=(state.req.destination.lat, state.req.destination.lon),
+            polar=polar,
+            forecast=state.forecast,
+            max_keep=_MAX_ROUTED_CANDIDATES,
+        )
+        log.info(
+            "planner.prefilter_applied",
+            voyage_id=state.voyage_id,
+            raw=raw_count,
+            kept=len(departures),
+        )
     _candidates_total.add(len(departures))
 
     # Serial routing — shapely PreparedGeometry (re-enabled below) is

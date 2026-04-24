@@ -40,7 +40,7 @@ from app.services.jobs import (
     insert_voyage,
     write_progress,
 )
-from app.services.planner import _adaptive_step_hours, enumerate_departures
+from app.services.planner import effective_routed_count
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/voyages", tags=["voyages"])
@@ -136,9 +136,7 @@ async def _attach_eta(voyage_id: str, req: VoyageRequest) -> None:
     try:
         settings = get_settings()
         real_charts = settings.chart_store_mode == "real"
-        n_candidates = len(
-            enumerate_departures(req, step_hours=_adaptive_step_hours(req))
-        )
+        n_candidates = effective_routed_count(req)
         async with session_scope() as session:
             eta = await estimate_eta(
                 req,
