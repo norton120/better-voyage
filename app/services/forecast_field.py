@@ -207,8 +207,6 @@ class ForecastField:
                     arr[i + 1, j + 1, k], arr[i + 1, j + 1, k + 1],
                 ]
             )
-            if np.isnan(corners).any():
-                return float("nan")
             weights = np.array(
                 [
                     (1 - fi) * (1 - fj) * (1 - fk),
@@ -221,7 +219,22 @@ class ForecastField:
                     fi * fj * fk,
                 ]
             )
-            return float((corners * weights).sum())
+            # Open-Meteo Marine returns nothing for grid points that sit
+            # on land — those corners come back as NaN. In coastal bbox
+            # shapes (Chesapeake, Puget Sound, etc.) a low-resolution
+            # grid often straddles land on at least one axis, so with
+            # strict all-corners-required the interpolator rejects
+            # essentially every water point and the router fails with
+            # ROUTE_NO_COVERAGE. Relax to the valid corners + renormalize
+            # weights; only fail when no corner is usable.
+            valid = ~np.isnan(corners)
+            if not valid.any():
+                return float("nan")
+            w = weights[valid]
+            total = w.sum()
+            if total == 0.0:
+                return float("nan")
+            return float((corners[valid] * w).sum() / total)
 
         values = {k2: sample(v) for k2, v in self.data.items()}
         if any(np.isnan(v) for v in values.values()):

@@ -49,6 +49,7 @@ from app.services.contingency import (
     plan_escape_hatches,
 )
 from app.services.forecast_field import ForecastField
+from app.services.geo import advance
 from app.services.gpx import emit_voyage
 from app.services.jobs import set_stage, write_progress
 from app.services.polars import Polar
@@ -227,32 +228,95 @@ async def _stage_charts_fetching(state: PlanState) -> None:
             ) from exc
     state.charts_coverage = await store.coverage(bbox)
     await _write_coverage(state)
-    _validate_endpoints_in_water(state.req, store)
+    profile = await boat_profiles.get(state.req.boat_profile_name)
+    if profile is None:
+        raise PlannerError(
+            "BOAT_PROFILE_NOT_FOUND",
+            "charts_fetching",
+            state.req.boat_profile_name,
+        )
+    _snap_endpoints_to_water(
+        state.req, store, profile.draft_m + profile.min_depth_m
+    )
     await write_progress(state.voyage_id, "charts_fetching", 1.0)
 
 
-def _validate_endpoints_in_water(
-    req: VoyageRequest, store: _ChartStore | NullChartStore
-) -> None:
-    """Fail fast if origin or destination sits inside a land polygon.
+# Spiral-snap parameters. Radii expand geometrically so we prefer
+# tiny nudges (a click on the wrong side of a pixel on a coarse bay
+# chart) over large relocations. 2 nm is the hard cap — beyond that
+# the user almost certainly picked the wrong spot entirely, and
+# silently relocating them > 2 nm would be more confusing than a
+# clean error.
+_SNAP_RADII_NM: tuple[float, ...] = (0.05, 0.10, 0.20, 0.40, 0.80, 1.50, 2.00)
+_SNAP_BEARINGS: tuple[float, ...] = tuple(float(i * 15) for i in range(24))
 
-    Without this, an on-land pick would run through the rest of the
-    job — forecast prefetching plus routing of every candidate
-    departure — before the router reported `ROUTE_BLOCKED`. Checking
-    here (once charts are loaded) keeps the feedback loop tight and
-    names the specific endpoint the user should fix.
+
+def _snap_endpoints_to_water(
+    req: VoyageRequest,
+    store: _ChartStore | NullChartStore,
+    required_depth_m: float,
+) -> None:
+    """Silently move endpoints to the nearest navigable water.
+
+    Two failure modes motivate this: (1) user clicks on a land polygon
+    pixel, (2) user clicks in water that's shallower than the boat's
+    `draft_m + min_depth_m`. Case 2 is the nasty one — without the
+    snap, every candidate departure grinds through all `max_steps`
+    isochrones before `ROUTE_TIMEOUT` because no pruned point can
+    ever satisfy the arrival-tolerance check (the destination's
+    approach cell fails the depth filter). With the snap, both cases
+    converge on "start/end a few hundred meters from the click, plan
+    normally" — which matches what a skipper would do at the helm.
+
+    Raises `ENDPOINT_ON_LAND` only if no navigable water exists
+    within 2 nm of the original point.
     """
-    for label, coord in (
-        ("origin", (req.origin.lat, req.origin.lon)),
-        ("destination", (req.destination.lat, req.destination.lon)),
-    ):
-        dist_nm = store.distance_to_land_nm(*coord)
-        if dist_nm <= 0.0:
+    for label, coord in (("origin", req.origin), ("destination", req.destination)):
+        if _point_is_navigable(store, coord.lat, coord.lon, required_depth_m):
+            continue
+        snapped = _find_nearest_navigable(
+            store, coord.lat, coord.lon, required_depth_m
+        )
+        if snapped is None:
             raise PlannerError(
                 "ENDPOINT_ON_LAND",
                 "charts_fetching",
-                f"{label} ({coord[0]:.5f}, {coord[1]:.5f}) is inside a land polygon",
+                f"{label} ({coord.lat:.5f}, {coord.lon:.5f}) has no navigable "
+                f"water (need ≥{required_depth_m:.1f} m) within 2 nm",
             )
+        log.info(
+            "endpoint snapped to navigable water",
+            extra={
+                "label": label,
+                "from": (coord.lat, coord.lon),
+                "to": snapped,
+                "required_depth_m": required_depth_m,
+            },
+        )
+        coord.lat, coord.lon = snapped
+
+
+def _point_is_navigable(
+    store: _ChartStore | NullChartStore, lat: float, lon: float, required_depth_m: float
+) -> bool:
+    if store.distance_to_land_nm(lat, lon) <= 0.0:
+        return False
+    depth = store.chart_depth(lat, lon)
+    return depth is not None and depth >= required_depth_m
+
+
+def _find_nearest_navigable(
+    store: _ChartStore | NullChartStore,
+    lat: float,
+    lon: float,
+    required_depth_m: float,
+) -> tuple[float, float] | None:
+    for r_nm in _SNAP_RADII_NM:
+        for bearing in _SNAP_BEARINGS:
+            cand_lat, cand_lon = advance(lat, lon, bearing, r_nm)
+            if _point_is_navigable(store, cand_lat, cand_lon, required_depth_m):
+                return cand_lat, cand_lon
+    return None
 
 
 async def _stage_charts_preprocessing(state: PlanState) -> None:

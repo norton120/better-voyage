@@ -332,6 +332,13 @@ def plan_candidate(
         ) <= exit_clear_nm
         return approach or exit_
 
+    # Per-step counters of why candidate propagations were discarded. When
+    # the frontier collapses and we raise ROUTE_NO_COVERAGE, these land in
+    # the error detail so the failure names the real cause (shallow water,
+    # GEBCO-says-land, forecast window exceeded, etc.) instead of the
+    # generic "empty frontier."
+    reject_totals: dict[str, int] = {}
+
     for step in range(1, max_steps + 1):
         frontier_pts = isochrones[-1]
         fine_mode = _frontier_near_shore(frontier_pts)
@@ -341,12 +348,15 @@ def plan_candidate(
         t = current_t
         frontier: list[IsochronePoint] = []
         fan_fn = heading_fan_fine if fine_mode else heading_fan
+        rejects: dict[str, int] = {}
 
         for pt in frontier_pts:
             env = forecast.at(pt.lat, pt.lon, t)
             if env is None:
+                rejects["env_none"] = rejects.get("env_none", 0) + 1
                 continue
             if env.wind_speed_kts > boat.max_wind_kts or env.wave_height_m > boat.max_seas_m:
+                rejects["weather_limits"] = rejects.get("weather_limits", 0) + 1
                 continue
 
             course_to_dest = bearing_deg(pt.lat, pt.lon, destination[0], destination[1])
@@ -354,21 +364,27 @@ def plan_candidate(
                 twa = relative_wind_angle(h, env.wind_dir_deg)
                 bsp = polar.bsp(twa, env.wind_speed_kts)
                 if bsp < boat.min_bsp_kts:
+                    rejects["min_bsp"] = rejects.get("min_bsp", 0) + 1
                     continue
 
                 new_lat, new_lon = _advance_with_current(pt.lat, pt.lon, h, bsp, env, step_h)
 
                 if charts.crosses_land((pt.lat, pt.lon), (new_lat, new_lon)):
+                    rejects["crosses_land"] = rejects.get("crosses_land", 0) + 1
                     continue
                 if charts.crosses_obstacle((pt.lat, pt.lon), (new_lat, new_lon)):
+                    rejects["crosses_obstacle"] = rejects.get("crosses_obstacle", 0) + 1
                     continue
                 if charts.is_restricted((new_lat, new_lon)):
+                    rejects["restricted"] = rejects.get("restricted", 0) + 1
                     continue
 
                 depth = charts.available_depth(new_lat, new_lon, t)
                 if depth is None:
+                    rejects["depth_none"] = rejects.get("depth_none", 0) + 1
                     continue
                 if depth < boat.draft_m + boat.min_depth_m:
+                    rejects["too_shallow"] = rejects.get("too_shallow", 0) + 1
                     continue
 
                 new_cost = pt.accumulated_cost + _leg_cost(pt, h, env, step_h, objective)
@@ -380,6 +396,8 @@ def plan_candidate(
                     )
                 )
 
+        for k, v in rejects.items():
+            reject_totals[k] = reject_totals.get(k, 0) + v
         _propagations_per_step.record(len(frontier), outcome_labels)
 
         if not frontier:
@@ -388,30 +406,58 @@ def plan_candidate(
                 _steps.record(step, outcome_labels)
                 _wallclock.record(time.monotonic() - t0, outcome_labels)
                 _outcomes.add(1, {**outcome_labels, "outcome": "no_coverage"})
-                raise RouterError("ROUTE_NO_COVERAGE", detail=f"empty frontier at step {step}")
+                worst = max(rejects.items(), key=lambda kv: kv[1]) if rejects else ("unknown", 0)
+                raise RouterError(
+                    "ROUTE_NO_COVERAGE",
+                    detail=(
+                        f"empty frontier at step {step}; "
+                        f"last_step_rejects={rejects}; "
+                        f"totals={reject_totals}; "
+                        f"top_reason={worst[0]}={worst[1]}"
+                    ),
+                )
             continue
         no_coverage_frontier_count = 0
 
+        # Arrival check runs on the full pre-prune frontier: `sector_prune`
+        # keeps only one best-progress point per angular sector around the
+        # centroid→destination axis, and when the boat is closing the last
+        # few nm to the destination the lead-edge propagation that actually
+        # landed within `arrival_tolerance_nm` of the destination is almost
+        # never the best-progress point in its sector (it's axially short
+        # because it's nearly AT the destination, while a sibling that
+        # overshoots wins on the `d * cos(rel)` metric). Running the check
+        # pre-prune means an arrival candidate is never silently discarded.
+        # Pick the closest frontier point so the returned route is the
+        # tightest arrival available this step.
+        arrived = min(
+            (p for p in frontier
+             if distance_nm(p.lat, p.lon, destination[0], destination[1])
+             <= arrival_tolerance_nm),
+            key=lambda p: distance_nm(p.lat, p.lon, destination[0], destination[1]),
+            default=None,
+        )
+        if arrived is not None:
+            final = IsochronePoint(
+                lat=destination[0], lon=destination[1], t=arrived.t,
+                parent=arrived, heading_deg=arrived.heading_deg,
+                bsp_kts=arrived.bsp_kts, env=arrived.env,
+                accumulated_cost=arrived.accumulated_cost,
+            )
+            isochrones.append([arrived])
+            _steps.record(step, outcome_labels)
+            _wallclock.record(time.monotonic() - t0, outcome_labels)
+            _outcomes.add(1, {**outcome_labels, "outcome": "ok"})
+            return RouteResult(
+                points=_backtrack(final),
+                reached_at=arrived.t,
+                steps_used=step,
+                objective=objective,
+                isochrones=isochrones,
+            )
+
         pruned = sector_prune(frontier, destination, objective=objective)
         isochrones.append(pruned)
-
-        for p in pruned:
-            if distance_nm(p.lat, p.lon, destination[0], destination[1]) <= arrival_tolerance_nm:
-                final = IsochronePoint(
-                    lat=destination[0], lon=destination[1], t=p.t,
-                    parent=p, heading_deg=p.heading_deg, bsp_kts=p.bsp_kts, env=p.env,
-                    accumulated_cost=p.accumulated_cost,
-                )
-                _steps.record(step, outcome_labels)
-                _wallclock.record(time.monotonic() - t0, outcome_labels)
-                _outcomes.add(1, {**outcome_labels, "outcome": "ok"})
-                return RouteResult(
-                    points=_backtrack(final),
-                    reached_at=p.t,
-                    steps_used=step,
-                    objective=objective,
-                    isochrones=isochrones,
-                )
 
     _steps.record(max_steps, outcome_labels)
     _wallclock.record(time.monotonic() - t0, outcome_labels)
