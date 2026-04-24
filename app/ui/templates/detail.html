@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>better-voyage — {{ voyage.id }}</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+        crossorigin="" />
+  <link rel="stylesheet" href="/static/ui.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+          crossorigin=""></script>
+  <script src="https://unpkg.com/htmx.org@1.9.12"
+          integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2"
+          crossorigin="anonymous"></script>
+</head>
+<body class="detail-page">
+  <header>
+    <h1><a href="/" class="home-link">better-voyage</a></h1>
+    <p class="sub">
+      voyage <code>{{ voyage.id }}</code>
+      · <a href="/">← plan another</a>
+    </p>
+  </header>
+
+  <main>
+    <section id="map-pane">
+      <div id="map"></div>
+    </section>
+
+    <section id="form-pane">
+      <section id="status-area" aria-live="polite">
+        {% if voyage.status == "done" %}
+          {% include "_candidates.html" %}
+        {% elif voyage.status in ("failed", "cancelled") %}
+          {% include "_error.html" %}
+        {% else %}
+          {% include "_status.html" %}
+        {% endif %}
+      </section>
+    </section>
+  </main>
+
+  <script src="/static/ui.js"></script>
+</body>
+</html>

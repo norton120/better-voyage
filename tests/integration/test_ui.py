@@ -61,25 +61,51 @@ async def test_ui_submit_returns_status_partial(client: AsyncClient) -> None:
         "earliest_local": "",
         "latest_local": "",
     }
-    resp = await client.post("/ui/voyages", data=form)
-    assert resp.status_code == 200
-    html = resp.text
-    assert 'hx-get="/ui/voyages/vy_' in html
-    assert "hx-trigger=\"every 2s\"" in html
-    assert "class=\"badge badge-" in html
+    # Non-HTMX client: submission 303s to the detail page. HTMX
+    # clients get an `HX-Redirect` header with a 200 body (tested
+    # separately below). Either way the destination is /v/{id}.
+    resp = await client.post("/ui/voyages", data=form, follow_redirects=False)
+    assert resp.status_code == 303
+    location = resp.headers["location"]
+    assert location.startswith("/v/vy_"), location
+    vid = location[len("/v/"):]
 
-    # Extract the voyage id from the hx-get URL and poll once.
-    match = re.search(
-        r'hx-get="/ui/voyages/(vy_[A-Z0-9]+)/status"', html
-    )
-    assert match is not None
-    vid = match.group(1)
+    detail = await client.get(location)
+    assert detail.status_code == 200
+    html = detail.text
+    # Detail page embeds the status partial; its hx-get points back at
+    # /ui/voyages/{id}/status and includes an adaptive poll interval
+    # (never the old fixed 2s).
+    assert f'hx-get="/ui/voyages/{vid}/status"' in html
+    assert re.search(r'hx-trigger="every \d+s"', html)
+    assert "class=\"badge badge-" in html
 
     poll = await client.get(f"/ui/voyages/{vid}/status")
     assert poll.status_code == 200
-    # Either still running (same shape) or already failed on mock gaps —
-    # we just check the partial was returned as HTML.
     assert poll.headers["content-type"].startswith("text/html")
+
+
+@pytest.mark.asyncio
+async def test_ui_submit_htmx_uses_hx_redirect(client: AsyncClient) -> None:
+    """HTMX clients get an HX-Redirect header instead of a 303. The
+    client-side library follows it as a hard navigation."""
+    form = {
+        "origin_lat": "38.9", "origin_lon": "-76.5",
+        "destination_lat": "38.5", "destination_lon": "-76.3",
+        "origin_name": "", "destination_name": "",
+        "start_at": "2026-05-01T00:00",
+        "end_at": "2026-05-02T00:00",
+        "tz": "UTC",
+        "boat_profile_name": "default",
+        "objective": "fastest",
+        "max_candidates": "2",
+        "earliest_local": "", "latest_local": "",
+    }
+    resp = await client.post(
+        "/ui/voyages", data=form, headers={"HX-Request": "true"}
+    )
+    assert resp.status_code == 200
+    assert resp.headers["HX-Redirect"].startswith("/v/vy_")
 
 
 @pytest.mark.asyncio

@@ -44,6 +44,41 @@ router = APIRouter(tags=["ui"])
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
 
+
+def _humanize_eta(seconds: float | int | None) -> str:
+    """Human-readable ETA for templates. None → em-dash."""
+    if seconds is None:
+        return "—"
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"~{s // 60} min"
+    h = s / 3600.0
+    return f"~{h:.1f} h"
+
+
+def _poll_seconds(eta_s: float | int | None) -> int:
+    """Server-chosen poll interval for the status partial.
+
+    Fast-enough-to-feel-live but not so fast it floods the API on
+    multi-minute jobs. Tied to the remaining ETA so short jobs still
+    feel responsive.
+    """
+    if eta_s is None or eta_s <= 0:
+        return 3
+    if eta_s < 30:
+        return 2
+    if eta_s < 120:
+        return 5
+    if eta_s < 600:
+        return 15
+    return 30
+
+
+templates.env.filters["humanize_eta"] = _humanize_eta
+templates.env.filters["poll_seconds"] = _poll_seconds
+
 GPX_NS = "http://www.topografix.com/GPX/1/1"
 BV_NS = "https://better-voyage.app/gpx/1"
 
@@ -184,11 +219,21 @@ async def submit_voyage(
         await delete_voyage(existing.id)
 
     vid = await insert_voyage(req)
+    # Attach submit-time ETA before dispatching so the detail page
+    # renders with a real estimate the moment the user lands there.
+    from app.routers.voyages import _attach_eta
+
+    await _attach_eta(vid, req)
     await registry.submit(vid)
-    row = await load_voyage(vid)
-    return templates.TemplateResponse(
-        request, "_status.html", {"voyage": _row_view(row)}
-    )
+    # HTMX clients: HX-Redirect triggers a hard navigation to the
+    # detail page. Non-HTMX fallback: 303 redirect.
+    detail_url = f"/v/{vid}"
+    is_htmx = request.headers.get("HX-Request") == "true"
+    if is_htmx:
+        resp = HTMLResponse("", status_code=200)
+        resp.headers["HX-Redirect"] = detail_url
+        return resp
+    return Response(status_code=303, headers={"Location": detail_url})
 
 
 # ---------------------------------------------------------------------------
@@ -196,29 +241,52 @@ async def submit_voyage(
 # ---------------------------------------------------------------------------
 
 
+def _status_partial_for(row: Voyage) -> tuple[str, dict[str, Any]]:
+    """Pick the right partial template and context for a voyage row.
+
+    Shared between the polling endpoint and the full detail page so the
+    two surfaces can't drift.
+    """
+    view = _row_view(row)
+    if row.status == "done":
+        view["candidates"] = _parse_candidates(row)
+        view["navaids"] = _parse_navaids(row)
+        return "_candidates.html", {"voyage": view}
+    if row.status in {"failed", "cancelled"}:
+        return "_error.html", {
+            "error_code": row.error_code or "FAILED",
+            "detail": row.error_detail or row.status,
+            "voyage_id": row.id,
+        }
+    return "_status.html", {"voyage": view}
+
+
 @router.get(
     "/ui/voyages/{voyage_id}/status", response_class=HTMLResponse
 )
 async def voyage_status(voyage_id: str, request: Request) -> Response:
     row = await load_voyage(voyage_id)
-    view = _row_view(row)
-    if row.status == "done":
-        view["candidates"] = _parse_candidates(row)
-        view["navaids"] = _parse_navaids(row)
-        return templates.TemplateResponse(
-            request, "_candidates.html", {"voyage": view}
-        )
-    if row.status in {"failed", "cancelled"}:
-        return templates.TemplateResponse(
-            request, "_error.html",
-            {
-                "error_code": row.error_code or "FAILED",
-                "detail": row.error_detail or row.status,
-                "voyage_id": row.id,
-            },
-        )
+    template, ctx = _status_partial_for(row)
+    return templates.TemplateResponse(request, template, ctx)
+
+
+@router.get("/v/{voyage_id}", response_class=HTMLResponse)
+async def voyage_detail(voyage_id: str, request: Request) -> Response:
+    """Voyage detail page — bookmarkable. Shows live status while
+    running, the ranked candidates when done."""
+    row = await load_voyage(voyage_id)
+    template, ctx = _status_partial_for(row)
+    # The detail template includes one of _status / _candidates /
+    # _error. Passing every key the partials might need into the top-
+    # level context keeps the includes happy.
     return templates.TemplateResponse(
-        request, "_status.html", {"voyage": view}
+        request,
+        "detail.html",
+        {
+            **ctx,
+            "voyage": ctx.get("voyage", {"id": row.id, "status": row.status}),
+            "partial": template,
+        },
     )
 
 
@@ -285,6 +353,7 @@ def _row_view(row: Voyage) -> dict[str, Any]:
         "stage": progress.get("stage", row.status),
         "pct": float(progress.get("pct") or 0.0),
         "detail": progress.get("detail"),
+        "eta_s": progress.get("eta_s"),
         "error_code": row.error_code,
         "error_detail": row.error_detail,
         "coverage": coverage,

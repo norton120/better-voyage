@@ -1,6 +1,6 @@
 <div class="status running"
      hx-get="/ui/voyages/{{ voyage.id }}/status"
-     hx-trigger="every 2s"
+     hx-trigger="every {{ voyage.eta_s | poll_seconds }}s"
      hx-swap="outerHTML">
   <div class="status-header">
     <span class="badge badge-{{ voyage.status }}">{{ voyage.status }}</span>
@@ -13,4 +13,15 @@
     <strong>{{ voyage.stage }}</strong>
     {% if voyage.detail %}<span class="stage-detail">— {{ voyage.detail }}</span>{% endif %}
   </div>
+  <div class="eta-line">
+    {% if voyage.eta_s %}
+      <span class="eta-label">estimated time remaining:</span>
+      <strong class="eta-value">{{ voyage.eta_s | humanize_eta }}</strong>
+    {% else %}
+      <span class="eta-label">estimating…</span>
+    {% endif %}
+  </div>
+  <p class="bookmark-hint">
+    safe to bookmark this page and come back — planning runs in the background.
+  </p>
 </div>
