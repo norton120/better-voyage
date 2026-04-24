@@ -69,6 +69,14 @@ _m = meter("app.services.planner")
 _candidates_total = _m.create_counter("bv.voyages.candidates_total", unit="1")
 _candidates_rejected = _m.create_counter("bv.voyages.candidates_rejected", unit="1")
 
+# Per-voyage wallclock ceiling. The UX model is "submit, come back later"
+# (see README / plan/17 UX notes), so this is a pathological-case safety
+# valve — not a quality ceiling. 2 h is enough headroom for 10 hard
+# coastal candidates at serial-routing pace (~5-10 min each) with 3x
+# margin. Voyages that exhaust this fail with ROUTE_BUDGET_EXHAUSTED and
+# surface however many candidates completed before the cap fired.
+_VOYAGE_WALLCLOCK_BUDGET_S = 2 * 60 * 60
+
 
 class PlannerError(Exception):
     """Typed job-level failure; maps to voyages.error_code on terminal state."""
@@ -486,7 +494,18 @@ async def _stage_routing(state: PlanState) -> None:
             )
 
         done = [0]
+        routing_start = time.monotonic()
+
         async def _one(t: datetime) -> tuple[datetime, RouteResult | None, str | None]:
+            # Per-voyage wallclock cap: once the budget is spent, any
+            # remaining candidates short-circuit as `route_budget_exhausted`
+            # without attempting work. Surfaces distinctly from per-
+            # candidate `ROUTE_TIMEOUT` so the user can tell "this
+            # voyage took too long overall" from "one candidate ran
+            # long and the rest were fine."
+            if time.monotonic() - routing_start > _VOYAGE_WALLCLOCK_BUDGET_S:
+                await _tick(len(departures), done)
+                return t, None, "ROUTE_BUDGET_EXHAUSTED"
             r = await _route_one(t, state, polar, charts, boat, sem)
             await _tick(len(departures), done)
             return r
@@ -532,6 +551,22 @@ async def _stage_routing(state: PlanState) -> None:
                     f"no candidates survived with stale forecast "
                     f"(oldest cache fetched_at={state.forecast_stale_at.isoformat()}); "
                     f"skipped={skipped}"
+                ),
+            )
+        # Prefer the budget-exhausted code when the per-voyage wallclock
+        # was the dominant reason — it tells the user "too expensive to
+        # compute in the time I was willing to spend" vs the generic
+        # "no viable route exists."
+        if (
+            skipped.get("route_budget_exhausted", 0) > 0
+            and skipped["route_budget_exhausted"] >= max(skipped.values())
+        ):
+            raise PlannerError(
+                "ROUTE_BUDGET_EXHAUSTED",
+                "routing",
+                (
+                    f"voyage wallclock budget ({_VOYAGE_WALLCLOCK_BUDGET_S // 60} min) "
+                    f"exhausted before any candidate completed; skipped={skipped}"
                 ),
             )
         raise PlannerError(

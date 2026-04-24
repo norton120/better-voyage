@@ -344,7 +344,7 @@ def plan_candidate(
     max_passage_hours: float = 168.0,
     arrival_tolerance_nm: float = 0.5,
     safety_margin_land_nm: float = 0.1,
-    wallclock_budget_s: float = 150.0,
+    wallclock_budget_s: float = 900.0,
     prune_mode: PruneMode = "sector",
 ) -> RouteResult:
     """Plan a single candidate departure.
@@ -358,10 +358,15 @@ def plan_candidate(
     The fine mode also swaps to a denser heading fan for better
     channel coverage.
 
-    Two termination budgets:
+    Three termination budgets:
 
     - `max_passage_hours` caps the planned ETA (default 168 h, the
       forecast horizon from plan/04).
+    - `wallclock_budget_s` caps real-time compute per candidate
+      (default 900 s / 15 min). Post-UX-reframe this is a pathological-
+      case safety valve, not a quality ceiling — a legitimately hard
+      coastal route should never approach it. Per-voyage wallclock is
+      enforced at the planner level (plan/17 / UX reframe notes).
     - `max_steps` is a safety-valve bound on total loop iterations;
       it only fires if the inner loop somehow fails to advance time.
 
