@@ -29,6 +29,7 @@ from app.db import session_scope
 from app.logging import get_logger
 from app.models.voyage import Voyage
 from app.observability import meter, tracer
+from app.services.geo import distance_nm
 from app.schemas.request import VoyageRequest
 from app.services import boat_profiles
 from app.services.charts import (
@@ -134,7 +135,20 @@ class PlanState:
     charts_coverage: ChartCoverage | None = None
 
 
-def _bbox_from_request(req: VoyageRequest, pad_deg: float = 0.5) -> tuple[float, float, float, float]:
+def _bbox_from_request(
+    req: VoyageRequest, min_pad_deg: float = 0.5
+) -> tuple[float, float, float, float]:
+    """Forecast bbox around the passage, padded for isochrone expansion.
+
+    A fixed 0.5° pad is too narrow once the passage extends beyond ~30 nm:
+    isochrone fans easily drift that much laterally chasing wind, and
+    any frontier point outside the forecast bbox returns `env_none`,
+    collapsing the frontier. Scale the pad with the passage extent so
+    long passages get proportionally more room to breathe.
+    """
+    lat_extent = abs(req.origin.lat - req.destination.lat)
+    lon_extent = abs(req.origin.lon - req.destination.lon)
+    pad_deg = max(min_pad_deg, 0.5 * max(lat_extent, lon_extent))
     lat_min = min(req.origin.lat, req.destination.lat) - pad_deg
     lat_max = max(req.origin.lat, req.destination.lat) + pad_deg
     lon_min = min(req.origin.lon, req.destination.lon) - pad_deg
@@ -331,9 +345,22 @@ async def _stage_forecast_prefetching(state: PlanState) -> None:
     await set_stage(state.voyage_id, "forecast_prefetching", pct=0.0, detail="fetching grid")
     bbox = _bbox_from_request(state.req)
     field_ = ForecastField(grid_res_deg=0.5)
+    # Forecast must cover departure-window + a passage-length buffer.
+    # A candidate departing at window.end_at needs forecast data for
+    # the full passage duration beyond that — otherwise forecast.at()
+    # returns None mid-route and the frontier collapses with env_none.
+    # Cap at the 7-day Open-Meteo marine horizon.
+    req = state.req
+    passage_nm = distance_nm(
+        req.origin.lat, req.origin.lon, req.destination.lat, req.destination.lon
+    )
+    # Conservative 3 kt effective speed — covers light-air legs and a
+    # long tacking track. Clamp between 24 h and 168 h.
+    passage_buffer_h = min(168.0, max(24.0, passage_nm / 3.0))
+    prefetch_end = req.window.end_at + timedelta(hours=passage_buffer_h)
     with _tracer.start_as_current_span("job.forecast_prefetching"):
         try:
-            await field_.prefetch(bbox, state.req.window.start_at, state.req.window.end_at)
+            await field_.prefetch(bbox, req.window.start_at, prefetch_end)
         except Exception as exc:
             raise PlannerError(
                 "FORECAST_UNAVAILABLE", "forecast_prefetching", str(exc)[:400]
@@ -374,6 +401,13 @@ async def _route_one(
             )
             return depart_at, result, None
         except RouterError as exc:
+            log.info(
+                "planner.candidate_failed",
+                voyage_id=state.voyage_id,
+                depart_at=depart_at.isoformat(),
+                code=exc.code,
+                detail=exc.detail,
+            )
             return depart_at, None, exc.code
 
 
