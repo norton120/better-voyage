@@ -19,8 +19,6 @@ out
 data
 plan
 tests
-README.md
-LICENSE
 Dockerfile
 compose.yaml
 .dockerignore

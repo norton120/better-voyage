@@ -40,6 +40,7 @@ FROM base AS dev
 
 COPY pyproject.toml ./
 COPY uv.lock* ./
+COPY LICENSE README.md ./
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen 2>/dev/null || uv sync

@@ -15,6 +15,7 @@ services:
       BV_ENV: dev
       BV_DATABASE_URL: sqlite+aiosqlite:////data/better-voyage.db
       BV_CACHE_DIR: /data/cache
+      BV_CHARTS_DIR: /data/charts
       BV_LOG_LEVEL: DEBUG
       BV_OTEL_EXPORTER: ${BV_OTEL_EXPORTER:-console}
       BV_OTEL_ENDPOINT: http://otel-lgtm:4318
