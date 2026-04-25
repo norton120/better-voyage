@@ -509,17 +509,23 @@ class ChartStore:
     ) -> bool:
         """Segment-vs-layer intersection, optionally buffered by `margin_nm`.
 
-        `margin_nm > 0` expands the test segment into a capsule of the
-        given half-width before the intersection check — so routes stay
-        that far clear of any loaded geom. The conversion treats 1° ≈
-        60 nm uniformly in lat and lon; at mid-latitudes this slightly
-        over-buffers in the east-west direction (in nm), which is the
-        safe direction for a safety margin.
+        Two test modes per geom type:
 
-        Uses prepared geometries when available. In shapely 2.1
-        PreparedGeometry is not guaranteed thread-safe; callers running
-        this concurrently must serialize (the planner currently does
-        via Semaphore(1) — see `_stage_routing`).
+        - **Polygons / MultiPolygons / GeometryCollections** — buffered
+          probe (`segment.buffer(margin_nm/60)`) against the geom. The
+          buffer enforces the safety margin: routes must stay that far
+          clear of any closed land mass.
+        - **LineStrings** — raw segment against the geom. Coastline
+          data from OSM is emitted as 1-D LineStrings (boundary between
+          land and water, not a polygon), so a buffered capsule running
+          *parallel* to a coastline within `margin_nm` would falsely
+          report a crossing without ever physically crossing. The raw
+          segment-vs-line intersect only fires on a real crossing.
+
+        This mixed strategy is a workaround for the OSM preprocessor
+        emitting coastlines as LineStrings rather than polygonizing
+        them. A future preprocessor that closes coastlines into land
+        polygons would let us drop the LineString branch entirely.
         """
         t0 = time.monotonic()
         _queries.add(1, {"kind": kind})
@@ -532,9 +538,10 @@ class ChartStore:
             else:
                 probe = seg
             idx = tree.query(probe)
-            if prepared and len(prepared) == len(geoms):
-                return any(prepared[i].intersects(probe) for i in idx)
-            return any(geoms[i].intersects(probe) for i in idx)
+            for i in idx:
+                if _hits(geoms[i], seg, probe):
+                    return True
+            return False
         finally:
             _query_duration.record(
                 time.monotonic() - t0, {"kind": kind}
@@ -751,6 +758,28 @@ class ChartStore:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+
+def _hits(geom: Any, seg: LineString, probe: Any) -> bool:
+    """Mixed-mode segment-vs-geom intersect.
+
+    LineStrings (1-D coastlines emitted by the OSM preprocessor) are
+    tested against the raw segment — proximity within `margin_nm`
+    isn't a crossing because there's no "land side" to a 1-D line.
+
+    Polygons / MultiPolygons (closed land masses, ENC LNDARE) are
+    tested against the buffered probe so the safety margin actually
+    applies.
+
+    GeometryCollections recurse — ENC layers occasionally mix the two
+    kinds in one feature.
+    """
+    gt = geom.geom_type
+    if gt == "LineString" or gt == "MultiLineString":
+        return geom.intersects(seg)
+    if gt == "GeometryCollection":
+        return any(_hits(g, seg, probe) for g in geom.geoms)
+    return geom.intersects(probe)
 
 
 def _bboxes_overlap(a: Bbox, b: Bbox) -> bool:
