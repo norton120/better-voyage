@@ -134,6 +134,9 @@ def real_chart_store(
     monkeypatch.setenv("BV_CHART_STORE_MODE", "real")
     monkeypatch.setenv("BV_CHARTS_DIR", str(charts_dir))
     monkeypatch.setenv("BV_GEBCO_PATH", str(synthetic_gebco))
+    # Pool routing forks subprocesses that don't see the monkeypatched
+    # fetchers below; force the threaded path so the fakes apply.
+    monkeypatch.setenv("BV_ROUTING_PROCESS_POOL", "false")
     # `get_settings` is lru_cached — bust it.
     from app.config import get_settings
 

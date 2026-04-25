@@ -33,7 +33,7 @@ import json
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -287,6 +287,76 @@ class ChartStore:
                     "charts.osm_extracts",
                     sum(1 for s in self._sources.values() if s.kind == "osm"),
                 )
+
+    def load_existing_for_bbox(self, bbox: Bbox) -> None:
+        """Load whatever preprocessed sources exist on disk that
+        intersect `bbox`. No fetches, no preprocess writes.
+
+        Used by routing subprocesses (`route_worker.py`) to set up
+        their own ChartStore without racing the parent's preprocess
+        cache. Assumes the parent already ran `ensure_coverage` and
+        wrote the preprocessed GeoJSON files.
+
+        Loads GEBCO too. If the GEBCO file is missing or doesn't
+        cover the bbox, raises `ChartsCoverageError` so the worker
+        fails its candidate cleanly instead of silently routing
+        without depth data.
+        """
+        gebco_path = self._gebco_path
+        if gebco_path is None or not gebco_path.exists():
+            raise ChartsCoverageError(
+                f"GEBCO file missing for worker load: {gebco_path}"
+            )
+        try:
+            self._gebco = load_gebco_bbox(gebco_path, bbox)
+        except ValueError as exc:
+            raise ChartsCoverageError(
+                f"GEBCO does not cover bbox {bbox}: {exc}"
+            ) from exc
+        self._gebco_bbox = bbox
+        self._gebco_tile_id = gebco_path.stem
+
+        enc_root = self._base_dir / "enc"
+        osm_root = self._base_dir / "osm"
+        for cell_dir in (enc_root.iterdir() if enc_root.exists() else []):
+            if not cell_dir.is_dir():
+                continue
+            geojson = cell_dir / f"{cell_dir.name}.preprocessed.geojson"
+            if not geojson.exists():
+                continue
+            try:
+                cell_bbox = _bbox_from_geojson(geojson)
+            except Exception:
+                continue
+            if not _bboxes_overlap(cell_bbox, bbox):
+                continue
+            if cell_dir.name in self._sources:
+                continue
+            self._sources[cell_dir.name] = self._load_source(
+                source_id=cell_dir.name,
+                kind="enc",
+                bbox=cell_bbox,
+                fetched_at=datetime.now(UTC),
+                geojson_path=geojson,
+            )
+        for path in (osm_root.glob("*.preprocessed.geojson") if osm_root.exists() else []):
+            extract_id = path.stem.replace(".preprocessed", "")
+            if extract_id in self._sources:
+                continue
+            try:
+                osm_bbox = _bbox_from_geojson(path)
+            except Exception:
+                continue
+            if not _bboxes_overlap(osm_bbox, bbox):
+                continue
+            self._sources[extract_id] = self._load_source(
+                source_id=extract_id,
+                kind="osm",
+                bbox=osm_bbox,
+                fetched_at=datetime.now(UTC),
+                geojson_path=path,
+            )
+        self._rebuild_indices()
 
     # ---- queries (sync, called from the router hot loop) ------------
 
@@ -681,6 +751,17 @@ class ChartStore:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+
+def _bboxes_overlap(a: Bbox, b: Bbox) -> bool:
+    """Test (lat_min, lon_min, lat_max, lon_max) intersection."""
+    a_lat_min, a_lon_min, a_lat_max, a_lon_max = a
+    b_lat_min, b_lon_min, b_lat_max, b_lon_max = b
+    if a_lat_max < b_lat_min or a_lat_min > b_lat_max:
+        return False
+    if a_lon_max < b_lon_min or a_lon_min > b_lon_max:
+        return False
+    return True
 
 
 def _bbox_to_polygon(bbox: Bbox) -> Polygon:

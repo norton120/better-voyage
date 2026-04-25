@@ -74,6 +74,13 @@ class Settings(BaseSettings):
     # stub that treats the planet as navigable water (tests + offline).
     chart_store_mode: Literal["real", "null"] = "real"
 
+    # When real charts are loaded, dispatch each candidate routing to a
+    # dedicated subprocess so shapely 2.1 PreparedGeometry doesn't hit
+    # its thread-safety hazards. Disable for test scenarios that
+    # monkey-patch in-process state (chart fetchers etc.) — those
+    # patches don't survive across process boundaries.
+    routing_process_pool: bool = True
+
     def effective_gebco_path(self) -> Path:
         """Resolve the GEBCO netCDF path, defaulting under `charts_dir`.
 

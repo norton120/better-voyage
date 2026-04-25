@@ -18,10 +18,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from datetime import time as dtime
+from functools import partial
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -60,8 +63,10 @@ from app.services.router import (
     RouteResult,
     plan_candidate,
 )
+from app.config import get_settings
 from app.services.eta import EtaEstimate, live_estimate
 from app.services.prefilter import prefilter_departures
+from app.services.route_worker import route_in_worker
 from app.services.scorer import Score, score_candidate
 from app.services.summary import Summary, summarize
 
@@ -419,6 +424,96 @@ async def _stage_forecast_prefetching(state: PlanState) -> None:
     await write_progress(state.voyage_id, "forecast_prefetching", 1.0)
 
 
+async def _route_via_pool(
+    *,
+    departures: list[datetime],
+    state: PlanState,
+    polar_path: str,
+    boat: BoatLimits,
+    n_workers: int,
+    routing_start: float,
+    tick: Any,
+    done: list[int],
+) -> list[tuple[datetime, RouteResult | None, str | None]]:
+    """Real-mode parallel routing across `ProcessPoolExecutor`.
+
+    Each subprocess runs `route_in_worker`, which lazily loads its own
+    `ChartStore` for the bbox and reuses it for every candidate it
+    handles. Worker results carry combined `CODE|detail` strings on
+    failure so the parent can log the detail without trying to pickle
+    a `RouterError` subclass across processes.
+
+    The per-voyage wallclock cap is enforced here in the parent: once
+    elapsed exceeds `_VOYAGE_WALLCLOCK_BUDGET_S`, any candidates that
+    haven't started yet short-circuit with `ROUTE_BUDGET_EXHAUSTED`.
+    """
+    settings = get_settings()
+    bbox = _bbox_from_request(state.req)
+    gebco = settings.effective_gebco_path()
+    worker_kwargs: dict[str, Any] = {
+        "origin": (state.req.origin.lat, state.req.origin.lon),
+        "destination": (state.req.destination.lat, state.req.destination.lon),
+        "forecast": state.forecast,
+        "polar_path": polar_path,
+        "boat": boat,
+        "bbox": bbox,
+        "charts_dir": str(settings.charts_dir),
+        "gebco_path": str(gebco) if gebco else None,
+        "chart_store_mode": settings.chart_store_mode,
+        "objective": state.req.objective,
+        "safety_margin_land_nm": 0.1,
+        "wallclock_budget_s": 900.0,
+        "max_passage_hours": 168.0,
+        "arrival_tolerance_nm": 0.5,
+    }
+
+    loop = asyncio.get_running_loop()
+    results: list[tuple[datetime, RouteResult | None, str | None]] = []
+
+    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+
+        async def _one_via_pool(
+            t: datetime,
+        ) -> tuple[datetime, RouteResult | None, str | None]:
+            if time.monotonic() - routing_start > _VOYAGE_WALLCLOCK_BUDGET_S:
+                await tick(len(departures), done)
+                return t, None, "ROUTE_BUDGET_EXHAUSTED"
+            future = loop.run_in_executor(
+                pool,
+                partial(route_in_worker, depart_at=t, **worker_kwargs),
+            )
+            try:
+                t_, route, err_raw = await future
+            except Exception as exc:  # noqa: BLE001 — log + count, don't crash voyage
+                log.exception(
+                    "planner.worker_crashed",
+                    voyage_id=state.voyage_id,
+                    depart_at=t.isoformat(),
+                    err=str(exc)[:200],
+                )
+                await tick(len(departures), done)
+                return t, None, "WORKER_CRASHED"
+            err_code: str | None = None
+            err_detail: str | None = None
+            if err_raw:
+                if "|" in err_raw:
+                    err_code, err_detail = err_raw.split("|", 1)
+                else:
+                    err_code = err_raw
+                log.info(
+                    "planner.candidate_failed",
+                    voyage_id=state.voyage_id,
+                    depart_at=t.isoformat(),
+                    code=err_code,
+                    detail=err_detail,
+                )
+            await tick(len(departures), done)
+            return t_, route, err_code
+
+        results = await asyncio.gather(*[_one_via_pool(t) for t in departures])
+    return results
+
+
 async def _route_one(
     depart_at: datetime,
     state: PlanState,
@@ -509,12 +604,25 @@ async def _stage_routing(state: PlanState) -> None:
         )
     _candidates_total.add(len(departures))
 
-    # Serial routing — shapely PreparedGeometry (re-enabled below) is
-    # not guaranteed thread-safe under shapely 2.1; observed silent
-    # segfaults under asyncio.to_thread concurrency on real charts.
-    # Revisit when a safer pattern is confirmed (per-thread prep caches
-    # or a shapely 2.2+ guarantee).
-    sem = asyncio.Semaphore(1)
+    # Real-mode routing dispatches to a per-voyage ProcessPoolExecutor
+    # so each candidate runs in its own Python interpreter — sidesteps
+    # the shapely 2.1 PreparedGeometry thread-safety hazard that
+    # otherwise forced us to Semaphore(1). Null mode stays on threads
+    # because NullChartStore touches no shapely state and process-spawn
+    # overhead would dwarf the per-candidate work.
+    settings = get_settings()
+    use_pool = (
+        settings.chart_store_mode == "real" and settings.routing_process_pool
+    )
+    # Cap at 4 even on big-core machines: each worker pays the
+    # ChartStore reload cost (~500 MB of polygons + STRtree build) and
+    # they race each other on the on-disk preprocess cache. 4 is a
+    # decent sweet spot — meaningful parallelism without worker storm.
+    n_workers = (
+        min(_MAX_ROUTED_CANDIDATES, len(departures), 4)
+        if use_pool
+        else 4
+    )
 
     with _tracer.start_as_current_span(
         "job.routing",
@@ -522,6 +630,8 @@ async def _stage_routing(state: PlanState) -> None:
             "voyage.id": state.voyage_id,
             "objective": state.req.objective,
             "departures": len(departures),
+            "n_workers": n_workers,
+            "use_pool": use_pool,
         },
     ):
         done = [0]
@@ -550,21 +660,31 @@ async def _stage_routing(state: PlanState) -> None:
                 eta_s=eta_override,
             )
 
-        async def _one(t: datetime) -> tuple[datetime, RouteResult | None, str | None]:
-            # Per-voyage wallclock cap: once the budget is spent, any
-            # remaining candidates short-circuit as `route_budget_exhausted`
-            # without attempting work. Surfaces distinctly from per-
-            # candidate `ROUTE_TIMEOUT` so the user can tell "this
-            # voyage took too long overall" from "one candidate ran
-            # long and the rest were fine."
-            if time.monotonic() - routing_start > _VOYAGE_WALLCLOCK_BUDGET_S:
-                await _tick(len(departures), done)
-                return t, None, "ROUTE_BUDGET_EXHAUSTED"
-            r = await _route_one(t, state, polar, charts, boat, sem)
-            await _tick(len(departures), done)
-            return r
+        if use_pool:
+            results = await _route_via_pool(
+                departures=departures,
+                state=state,
+                polar_path=str(profile.polar_path),
+                boat=boat,
+                n_workers=n_workers,
+                routing_start=routing_start,
+                tick=_tick,
+                done=done,
+            )
+        else:
+            sem = asyncio.Semaphore(n_workers)
 
-        results = await asyncio.gather(*[_one(t) for t in departures])
+            async def _one(
+                t: datetime,
+            ) -> tuple[datetime, RouteResult | None, str | None]:
+                if time.monotonic() - routing_start > _VOYAGE_WALLCLOCK_BUDGET_S:
+                    await _tick(len(departures), done)
+                    return t, None, "ROUTE_BUDGET_EXHAUSTED"
+                r = await _route_one(t, state, polar, charts, boat, sem)
+                await _tick(len(departures), done)
+                return r
+
+            results = await asyncio.gather(*[_one(t) for t in departures])
 
     try:
         tz = ZoneInfo(state.req.window.tz)
