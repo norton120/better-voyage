@@ -1,4 +1,5 @@
 # better-voyage
+<img width="90%" alt="plotted route" src="https://github.com/user-attachments/assets/5b90f4f2-fa8b-4af9-8a09-13c39ad6a9b9" />
 
 Context-aware GPX route planner for sailing passages (OpenCPN-compatible).
 
