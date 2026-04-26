@@ -26,6 +26,7 @@ work outward.
 | 14  | [observability.md](./14-observability.md)           | Logs, traces, metrics, plan audit trail               |
 | 15  | [jobs-async.md](./15-jobs-async.md)                 | Async job model: states, progress, lifecycle          |
 | 17  | [isochrone-overhaul.md](./17-isochrone-overhaul.md) | Diagnosis + plan to replace sector-prune with Normalize/Merge |
+| 18  | [router-perf-investigation.md](./18-router-perf-investigation.md) | Handoff: real-charts routing is ~7 s/step — profile + optimize |
 
 ## Conventions
 
